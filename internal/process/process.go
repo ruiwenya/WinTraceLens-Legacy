@@ -1,0 +1,52 @@
+package process
+
+type Info struct {
+	PID             uint32 `json:"pid"`
+	Name            string `json:"name"`
+	ParentPID       uint32 `json:"parentPid"`
+	ParentName      string `json:"parentName"`
+	CreatedAt       string `json:"createdAt"`
+	Path            string `json:"path"`
+	FileCreated     string `json:"fileCreated"`
+	FileModified    string `json:"fileModified"`
+	MD5             string `json:"md5"`
+	Signature       string `json:"signature"`
+	SignatureMsg    string `json:"signatureMsg"`
+	ConnectionCount int    `json:"connectionCount"`
+	CPUPercent      string `json:"cpuPercent"`
+	WorkingSetKB    uint64 `json:"workingSetKb"`
+	ThreadCount     uint32 `json:"threadCount"`
+	HandleCount     uint32 `json:"handleCount"`
+	HashError       string `json:"hashError"`
+	PathError       string `json:"pathError"`
+}
+
+type Options struct {
+	HashLimitBytes int64
+	SkipHashes     bool
+	SkipSignatures bool
+}
+
+type ModuleInfo struct {
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	BaseAddress  string `json:"baseAddress"`
+	SizeKB       uint32 `json:"sizeKb"`
+	MD5          string `json:"md5"`
+	Signature    string `json:"signature"`
+	SignatureMsg string `json:"signatureMsg"`
+	HashError    string `json:"hashError"`
+}
+
+type ConnectionInfo struct {
+	PID        uint32 `json:"pid"`
+	Protocol   string `json:"protocol"`
+	Local      string `json:"local"`
+	LocalIP    string `json:"localIp"`
+	LocalPort  uint16 `json:"localPort"`
+	Remote     string `json:"remote"`
+	RemoteIP   string `json:"remoteIp"`
+	RemotePort uint16 `json:"remotePort"`
+	RemoteKind string `json:"remoteKind"`
+	State      string `json:"state"`
+}
