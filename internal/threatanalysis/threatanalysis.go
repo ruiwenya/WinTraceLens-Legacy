@@ -274,6 +274,14 @@ func analyzeProcess(item process.Info, persistence map[string][]string, traces t
 		builder.add(3, "系统工具/脚本解释器可疑", fmt.Sprintf("父进程 %s(%d)，连接数 %d", item.ParentName, item.ParentPID, item.ConnectionCount))
 		builder.hasLOLBIN = true
 	}
+	if suspiciousSystemCommandLine(item.Name, item.CommandLine) && !scannerPowerShell {
+		points := 3
+		if item.ConnectionCount > 0 {
+			points = 4
+		}
+		builder.add(points, "系统工具命令行可疑", trimEvidence(item.CommandLine, 260))
+		builder.hasLOLBIN = true
+	}
 
 	if suspiciousParentChild(item.ParentName, item.Name) && !scannerPowerShell {
 		builder.add(3, "可疑父子进程关系", fmt.Sprintf("%s(%d) -> %s(%d)", item.ParentName, item.ParentPID, item.Name, item.PID))
@@ -553,6 +561,15 @@ func normalizePath(path string) string {
 	return strings.ToLower(strings.ReplaceAll(path, "/", `\`))
 }
 
+func trimEvidence(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len([]rune(value)) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:limit]) + "..."
+}
+
 func isWritablePath(path string) bool {
 	lower := normalizePath(path)
 	for _, marker := range []string{
@@ -634,6 +651,23 @@ func isScannerPowerShell(item process.Info) bool {
 
 func isPowerShellName(name string) bool {
 	return name == "powershell" || name == "pwsh"
+}
+
+func suspiciousSystemCommandLine(name, commandLine string) bool {
+	lowerName := strings.ToLower(name)
+	lowerCommand := strings.ToLower(commandLine)
+	if lowerCommand == "" || !isLOLBIN(lowerName) {
+		return false
+	}
+	for _, marker := range []string{
+		" -enc", "-encodedcommand", "frombase64string", "downloadstring", "invoke-webrequest", "invoke-expression", " iex",
+		"http://", "https://", ".ps1", ".vbs", ".js", ".jse", ".hta", ".dll", " -nop", " -w hidden", " /c ",
+	} {
+		if strings.Contains(lowerCommand, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isWindowsExplorerPath(path string) bool {

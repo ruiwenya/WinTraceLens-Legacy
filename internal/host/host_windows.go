@@ -421,10 +421,19 @@ func collectStartupRegistryReg() ([]psStartupItem, error) {
 	}{
 		{"HKLM Run", `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`},
 		{"HKLM RunOnce", `HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce`},
+		{"HKLM Policies Run", `HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run`},
+		{"HKLM RunServices", `HKLM\Software\Microsoft\Windows\CurrentVersion\RunServices`},
+		{"HKLM RunServicesOnce", `HKLM\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce`},
 		{"HKCU Run", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`},
 		{"HKCU RunOnce", `HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce`},
+		{"HKCU Policies Run", `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run`},
+		{"HKCU RunServices", `HKCU\Software\Microsoft\Windows\CurrentVersion\RunServices`},
+		{"HKCU RunServicesOnce", `HKCU\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce`},
 		{"HKLM Wow6432 Run", `HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run`},
 		{"HKLM Wow6432 RunOnce", `HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce`},
+		{"HKLM Wow6432 Policies Run", `HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run`},
+		{"HKLM Wow6432 RunServices", `HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunServices`},
+		{"HKLM Wow6432 RunServicesOnce", `HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunServicesOnce`},
 	}
 
 	var items []psStartupItem
@@ -446,6 +455,7 @@ func collectStartupRegistryReg() ([]psStartupItem, error) {
 			})
 		}
 	}
+	items = append(items, collectActiveSetupStartupReg()...)
 	return items, firstErr
 }
 
@@ -465,6 +475,34 @@ func collectStartupFoldersGo() []psStartupItem {
 			source string
 			path   string
 		}{"Common Startup", filepath.Join(programData, `Microsoft\Windows\Start Menu\Programs\Startup`)})
+	}
+	if allUsers := os.Getenv("ALLUSERSPROFILE"); allUsers != "" {
+		folders = append(folders, struct {
+			source string
+			path   string
+		}{"All Users Startup", filepath.Join(allUsers, `Microsoft\Windows\Start Menu\Programs\Startup`)})
+	}
+	if systemDrive := os.Getenv("SystemDrive"); systemDrive != "" {
+		usersRoot := filepath.Join(systemDrive+`\`, "Users")
+		if entries, err := os.ReadDir(usersRoot); err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				name := entry.Name()
+				lower := strings.ToLower(name)
+				if lower == "all users" || lower == "default" || lower == "default user" || lower == "public" {
+					continue
+				}
+				folders = append(folders, struct {
+					source string
+					path   string
+				}{
+					source: "Profile Startup: " + name,
+					path:   filepath.Join(usersRoot, name, `AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`),
+				})
+			}
+		}
 	}
 
 	var items []psStartupItem
@@ -487,6 +525,43 @@ func collectStartupFoldersGo() []psStartupItem {
 				Command:  fullPath,
 				Location: folder.path,
 			})
+		}
+	}
+	return items
+}
+
+func collectActiveSetupStartupReg() []psStartupItem {
+	roots := []struct {
+		source string
+		path   string
+	}{
+		{"HKLM Active Setup", `HKLM\Software\Microsoft\Active Setup\Installed Components`},
+		{"HKCU Active Setup", `HKCU\Software\Microsoft\Active Setup\Installed Components`},
+		{"HKLM Wow6432 Active Setup", `HKLM\Software\Wow6432Node\Microsoft\Active Setup\Installed Components`},
+	}
+
+	var items []psStartupItem
+	for _, root := range roots {
+		subKeys, err := queryRegSubKeys(root.path)
+		if err != nil {
+			continue
+		}
+		for _, subKey := range subKeys {
+			rows, err := queryRegValues(subKey)
+			if err != nil {
+				continue
+			}
+			for _, row := range rows {
+				if !strings.EqualFold(row.name, "StubPath") || strings.TrimSpace(row.value) == "" {
+					continue
+				}
+				items = append(items, psStartupItem{
+					Source:   root.source,
+					Name:     taskNameFromPath(subKey),
+					Command:  row.value,
+					Location: subKey,
+				})
+			}
 		}
 	}
 	return items
@@ -549,6 +624,28 @@ func queryRegValues(path string) ([]regValue, error) {
 	return rows, nil
 }
 
+func queryRegSubKeys(path string) ([]string, error) {
+	cmd := winexec.Command("cmd.exe", "/U", "/C", "reg.exe", "query", path)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	root := strings.ToUpper(strings.TrimRight(path, `\`))
+	var rows []string
+	for _, line := range strings.Split(decodeCommandOutput(out), "\n") {
+		trimmed := strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if trimmed == "" || !strings.HasPrefix(strings.ToUpper(trimmed), "HKEY_") {
+			continue
+		}
+		if strings.EqualFold(strings.TrimRight(trimmed, `\`), root) {
+			continue
+		}
+		rows = append(rows, trimmed)
+	}
+	return rows, nil
+}
+
 func parseRegValueLine(line string) (regValue, bool) {
 	line = strings.TrimRight(line, "\r")
 	if strings.TrimSpace(line) == "" {
@@ -600,10 +697,19 @@ $startupRegistry = @()
 $runKeys = @(
   @{Source='HKLM Run'; Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'},
   @{Source='HKLM RunOnce'; Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'},
+  @{Source='HKLM Policies Run'; Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run'},
+  @{Source='HKLM RunServices'; Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\RunServices'},
+  @{Source='HKLM RunServicesOnce'; Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce'},
   @{Source='HKCU Run'; Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'},
   @{Source='HKCU RunOnce'; Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'},
+  @{Source='HKCU Policies Run'; Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run'},
+  @{Source='HKCU RunServices'; Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\RunServices'},
+  @{Source='HKCU RunServicesOnce'; Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce'},
   @{Source='HKLM Wow6432 Run'; Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run'},
-  @{Source='HKLM Wow6432 RunOnce'; Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce'}
+  @{Source='HKLM Wow6432 RunOnce'; Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce'},
+  @{Source='HKLM Wow6432 Policies Run'; Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run'},
+  @{Source='HKLM Wow6432 RunServices'; Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunServices'},
+  @{Source='HKLM Wow6432 RunServicesOnce'; Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunServicesOnce'}
 )
 foreach ($key in $runKeys) {
   $props = Get-ItemProperty -Path $key.Path
@@ -611,6 +717,21 @@ foreach ($key in $runKeys) {
     foreach ($prop in $props.PSObject.Properties) {
       if ($prop.Name -notmatch '^PS') {
         $startupRegistry += [pscustomobject]@{Source=$key.Source; Name=$prop.Name; Command=[string]$prop.Value; Location=$key.Path}
+      }
+    }
+  }
+}
+$activeSetupRoots = @(
+  @{Source='HKLM Active Setup'; Path='HKLM:\Software\Microsoft\Active Setup\Installed Components'},
+  @{Source='HKCU Active Setup'; Path='HKCU:\Software\Microsoft\Active Setup\Installed Components'},
+  @{Source='HKLM Wow6432 Active Setup'; Path='HKLM:\Software\Wow6432Node\Microsoft\Active Setup\Installed Components'}
+)
+foreach ($root in $activeSetupRoots) {
+  if (Test-Path $root.Path) {
+    Get-ChildItem -LiteralPath $root.Path | ForEach-Object {
+      $stub = (Get-ItemProperty -LiteralPath $_.PSPath -Name StubPath).StubPath
+      if ($stub) {
+        $startupRegistry += [pscustomobject]@{Source=$root.Source; Name=$_.PSChildName; Command=[string]$stub; Location=$_.Name}
       }
     }
   }
@@ -935,16 +1056,38 @@ func decodeHostFields(values []string) ([]string, error) {
 }
 
 func collectScheduledTasks(opts Options) ([]ScheduledTaskInfo, error) {
-	if tasks, err := collectScheduledTasksCOM(opts); err == nil && len(tasks) > 0 {
-		return tasks, nil
+	var tasks []ScheduledTaskInfo
+	var errs []string
+
+	collectors := []struct {
+		name string
+		fn   func(Options) ([]ScheduledTaskInfo, error)
+	}{
+		{"Schedule COM", collectScheduledTasksCOM},
+		{"schtasks PowerShell", collectSchtasksPowerShell},
+		{"schtasks CSV", collectSchtasksCSV},
+		{"task XML", collectScheduledTaskXMLFiles},
+		{"legacy .job", collectLegacyJobTasks},
 	}
-	if tasks, err := collectSchtasksPowerShell(opts); err == nil && len(tasks) > 0 {
-		return tasks, nil
-	}
-	if tasks, err := collectSchtasksCSV(opts); err == nil && len(tasks) > 0 {
-		return tasks, nil
+	for _, collector := range collectors {
+		items, err := collector.fn(opts)
+		if err != nil {
+			errs = append(errs, collector.name+": "+err.Error())
+			continue
+		}
+		tasks = mergeScheduledTasks(tasks, items)
 	}
 
+	if len(tasks) > 0 {
+		return tasks, nil
+	}
+	if len(errs) > 0 {
+		return nil, errors.New(strings.Join(errs, "; "))
+	}
+	return nil, nil
+}
+
+func collectScheduledTaskXMLFiles(opts Options) ([]ScheduledTaskInfo, error) {
 	root := filepath.Join(os.Getenv("SystemRoot"), "System32", "Tasks")
 	if root == "" || !filepath.IsAbs(root) {
 		return nil, errors.New("cannot resolve scheduled task root")
@@ -965,33 +1108,153 @@ func collectScheduledTasks(opts Options) ([]ScheduledTaskInfo, error) {
 	return tasks, err
 }
 
+func collectLegacyJobTasks(opts Options) ([]ScheduledTaskInfo, error) {
+	root := filepath.Join(os.Getenv("SystemRoot"), "Tasks")
+	if root == "" || !filepath.IsAbs(root) {
+		return nil, errors.New("cannot resolve legacy scheduled task root")
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var tasks []ScheduledTaskInfo
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".job") {
+			continue
+		}
+		fullPath := filepath.Join(root, entry.Name())
+		tasks = append(tasks, ScheduledTaskInfo{
+			Name:       strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())),
+			Path:       `\` + entry.Name(),
+			State:      "Legacy .job",
+			Status:     "存在旧式计划任务文件",
+			Command:    fullPath,
+			Executable: "",
+		})
+	}
+	return tasks, nil
+}
+
+func mergeScheduledTasks(dst, src []ScheduledTaskInfo) []ScheduledTaskInfo {
+	index := make(map[string]int, len(dst))
+	for i := range dst {
+		index[scheduledTaskKey(dst[i])] = i
+	}
+	for _, item := range src {
+		key := scheduledTaskKey(item)
+		if key == "" {
+			continue
+		}
+		if i, ok := index[key]; ok {
+			dst[i] = richerScheduledTask(dst[i], item)
+			continue
+		}
+		index[key] = len(dst)
+		dst = append(dst, item)
+	}
+	return dst
+}
+
+func scheduledTaskKey(item ScheduledTaskInfo) string {
+	if strings.TrimSpace(item.Path) != "" {
+		return strings.ToLower(strings.TrimSpace(item.Path))
+	}
+	if strings.TrimSpace(item.Name) != "" {
+		return strings.ToLower(strings.TrimSpace(item.Name))
+	}
+	return ""
+}
+
+func richerScheduledTask(a, b ScheduledTaskInfo) ScheduledTaskInfo {
+	if scheduledTaskScore(b) > scheduledTaskScore(a) {
+		a, b = b, a
+	}
+	if a.Command == "" {
+		a.Command = b.Command
+	}
+	if a.Arguments == "" {
+		a.Arguments = b.Arguments
+	}
+	if a.Executable == "" {
+		a.Executable = b.Executable
+	}
+	if a.MD5 == "" {
+		a.MD5 = b.MD5
+	}
+	if a.Signature == "" {
+		a.Signature = b.Signature
+		a.SignatureMsg = b.SignatureMsg
+	}
+	if a.HashError == "" {
+		a.HashError = b.HashError
+	}
+	if a.Author == "" {
+		a.Author = b.Author
+	}
+	if a.State == "" {
+		a.State = b.State
+	}
+	if a.Status == "" {
+		a.Status = b.Status
+	}
+	return a
+}
+
+func scheduledTaskScore(item ScheduledTaskInfo) int {
+	score := 0
+	for _, value := range []string{item.Command, item.Executable, item.MD5, item.Signature, item.Author, item.State, item.Status} {
+		if strings.TrimSpace(value) != "" {
+			score++
+		}
+	}
+	return score
+}
+
 func collectScheduledTasksCOM(opts Options) ([]ScheduledTaskInfo, error) {
 	script := `
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
+function Clean-Text($value) {
+  if ($null -eq $value) { return '' }
+  return ([string]$value).Replace([string][char]9, ' ').Replace([string][char]13, ' ').Replace([string][char]10, ' ')
+}
 function Convert-TaskState($state) {
   switch ($state) { 0 {'Unknown'} 1 {'Disabled'} 2 {'Queued'} 3 {'Ready'} 4 {'Running'} default {[string]$state} }
 }
 function Walk-Folder($folder) {
   foreach ($task in @($folder.GetTasks(0))) {
+    $emitted = $false
     foreach ($action in @($task.Definition.Actions)) {
       if ($action.Type -eq 0) {
-        [pscustomobject]@{
-          Name=$task.Name
-          Path=$task.Path
-          State=($(if ($task.Enabled) {'Enabled'} else {'Disabled'}))
-          Status=(Convert-TaskState $task.State)
-          Author=$task.Definition.RegistrationInfo.Author
-          Command=(($action.Path + ' ' + $action.Arguments).Trim())
-        }
+        $command = (($action.Path + ' ' + $action.Arguments).Trim())
+        [Console]::Out.WriteLine((@(
+          (Clean-Text $task.Name),
+          (Clean-Text $task.Path),
+          (Clean-Text ($(if ($task.Enabled) {'Enabled'} else {'Disabled'}))),
+          (Clean-Text (Convert-TaskState $task.State)),
+          (Clean-Text $task.Definition.RegistrationInfo.Author),
+          (Clean-Text $command)
+        ) -join ([string][char]9)))
+        $emitted = $true
       }
+    }
+    if (-not $emitted) {
+      [Console]::Out.WriteLine((@(
+        (Clean-Text $task.Name),
+        (Clean-Text $task.Path),
+        (Clean-Text ($(if ($task.Enabled) {'Enabled'} else {'Disabled'}))),
+        (Clean-Text (Convert-TaskState $task.State)),
+        (Clean-Text $task.Definition.RegistrationInfo.Author),
+        '非 Exec 动作/无直接命令'
+      ) -join ([string][char]9)))
     }
   }
   foreach ($child in @($folder.GetFolders(0))) { Walk-Folder $child }
 }
 $schedule = New-Object -ComObject Schedule.Service
 $schedule.Connect()
-@((Walk-Folder ($schedule.GetFolder('\')))) | ConvertTo-Json -Compress -Depth 4
+Walk-Folder ($schedule.GetFolder('\'))
 `
 	cmd := winexec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
 	var stderr bytes.Buffer
@@ -1005,28 +1268,36 @@ $schedule.Connect()
 		return nil, errors.New(msg)
 	}
 
-	var tasks []psTask
-	if err := unmarshalPSTaskList(out, &tasks); err != nil {
-		return nil, err
-	}
-	return tasksFromPS(tasks, opts), nil
+	return tasksFromTextLines(out, opts), nil
 }
 
 func collectSchtasksPowerShell(opts Options) ([]ScheduledTaskInfo, error) {
 	script := `
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
-$tasks = schtasks.exe /query /fo csv /v | ConvertFrom-Csv | Where-Object { $_.TaskName -and $_.TaskName -ne 'TaskName' } | ForEach-Object {
-  [pscustomobject]@{
-    Name=($_.TaskName -replace '^.*\\','')
-    Path=$_.TaskName
-    State=$_.'Scheduled Task State'
-    Status=$_.Status
-    Author=$_.Author
-    Command=$_.'Task To Run'
-  }
+function Clean-Text($value) {
+  if ($null -eq $value) { return '' }
+  return ([string]$value).Replace([string][char]9, ' ').Replace([string][char]13, ' ').Replace([string][char]10, ' ')
 }
-@($tasks) | ConvertTo-Json -Compress -Depth 4
+function First-Prop($obj, $names) {
+  foreach ($name in $names) {
+    if ($obj.PSObject.Properties[$name]) { return $obj.PSObject.Properties[$name].Value }
+  }
+  return ''
+}
+schtasks.exe /query /fo csv /v | ConvertFrom-Csv | ForEach-Object {
+  $path = First-Prop $_ @('TaskName','Task Name','任务名','任务名称')
+  if (-not $path -or $path -eq 'TaskName') { return }
+  $name = ([string]$path) -replace '^.*\\',''
+  [Console]::Out.WriteLine((@(
+    (Clean-Text $name),
+    (Clean-Text $path),
+    (Clean-Text (First-Prop $_ @('Scheduled Task State','计划任务状态'))),
+    (Clean-Text (First-Prop $_ @('Status','状态'))),
+    (Clean-Text (First-Prop $_ @('Author','作者'))),
+    (Clean-Text (First-Prop $_ @('Task To Run','要运行的任务','执行的任务')))
+  ) -join ([string][char]9)))
+}
 `
 	cmd := winexec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
 	var stderr bytes.Buffer
@@ -1040,27 +1311,30 @@ $tasks = schtasks.exe /query /fo csv /v | ConvertFrom-Csv | Where-Object { $_.Ta
 		return nil, errors.New(msg)
 	}
 
-	var tasks []psTask
-	if err := unmarshalPSTaskList(out, &tasks); err != nil {
-		return nil, err
-	}
-	return tasksFromPS(tasks, opts), nil
+	return tasksFromTextLines(out, opts), nil
 }
 
-func unmarshalPSTaskList(raw []byte, out *[]psTask) error {
-	data := bytes.TrimSpace([]byte(decodeCommandOutput(raw)))
-	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
-		return nil
+func tasksFromTextLines(raw []byte, opts Options) []ScheduledTaskInfo {
+	var items []psTask
+	for _, line := range strings.Split(decodeCommandOutput(raw), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		for len(parts) < 6 {
+			parts = append(parts, "")
+		}
+		items = append(items, psTask{
+			Name:    strings.TrimSpace(parts[0]),
+			Path:    strings.TrimSpace(parts[1]),
+			State:   strings.TrimSpace(parts[2]),
+			Status:  strings.TrimSpace(parts[3]),
+			Author:  strings.TrimSpace(parts[4]),
+			Command: strings.TrimSpace(parts[5]),
+		})
 	}
-	if data[0] == '[' {
-		return json.Unmarshal(data, out)
-	}
-	var one psTask
-	if err := json.Unmarshal(data, &one); err != nil {
-		return err
-	}
-	*out = []psTask{one}
-	return nil
+	return tasksFromPS(items, opts)
 }
 
 func collectSchtasksCSV(opts Options) ([]ScheduledTaskInfo, error) {
@@ -1087,30 +1361,36 @@ func collectSchtasksCSV(opts Options) ([]ScheduledTaskInfo, error) {
 		index[name] = i
 	}
 
-	get := func(record []string, name string) string {
-		i, ok := index[name]
-		if !ok || i < 0 || i >= len(record) {
-			return ""
+	getAny := func(record []string, names ...string) string {
+		for _, name := range names {
+			i, ok := index[name]
+			if !ok || i < 0 || i >= len(record) {
+				continue
+			}
+			value := strings.TrimSpace(record[i])
+			if value != "" {
+				return value
+			}
 		}
-		return strings.TrimSpace(record[i])
+		return ""
 	}
 
 	tasks := make([]ScheduledTaskInfo, 0, len(records)-1)
 	for _, record := range records[1:] {
-		taskPath := get(record, "TaskName")
+		taskPath := getAny(record, "TaskName", "Task Name", "任务名", "任务名称")
 		if taskPath == "" || taskPath == "TaskName" {
 			continue
 		}
 
-		command := get(record, "Task To Run")
+		command := getAny(record, "Task To Run", "要运行的任务", "执行的任务")
 		executable := executablePathFromCommand(command)
 		md5, hashErr, sig := enrichExecutable(executable, opts)
 		tasks = append(tasks, ScheduledTaskInfo{
 			Name:         taskNameFromPath(taskPath),
 			Path:         taskPath,
-			State:        get(record, "Scheduled Task State"),
-			Status:       get(record, "Status"),
-			Author:       get(record, "Author"),
+			State:        getAny(record, "Scheduled Task State", "计划任务状态"),
+			Status:       getAny(record, "Status", "状态"),
+			Author:       getAny(record, "Author", "作者"),
 			Command:      command,
 			Executable:   executable,
 			MD5:          md5,

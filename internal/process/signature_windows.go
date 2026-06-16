@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -137,18 +138,19 @@ func CheckSignature(path string) SignatureResult {
 		catalogMsg = fmt.Sprintf("; Catalog 返回 0x%08X", catalogCode)
 	}
 
-	if systemPath {
-		return SignatureResult{
-			Status:  "系统文件",
-			Message: "位于 Windows 系统目录；嵌入签名未验证: " + embeddedMsg + catalogMsg,
-		}
-	}
-
 	if isNoSignatureCode(embeddedCode) && (catalogCode == 0 || isNoSignatureCode(catalogCode) || errors.Is(catalogErr, errCatalogNotFound)) {
-		return SignatureResult{Status: "无签名请注意!!!", Message: "未发现可信嵌入签名或 Catalog 签名"}
+		msg := "未发现可信嵌入签名或 Catalog 签名"
+		if systemPath {
+			msg = "位于 Windows 受保护目录，但" + msg
+		}
+		return SignatureResult{Status: "无签名请注意!!!", Message: msg}
 	}
 
-	return SignatureResult{Status: "签名异常", Message: "嵌入签名: " + embeddedMsg + catalogMsg}
+	msg := "嵌入签名: " + embeddedMsg + catalogMsg
+	if systemPath {
+		msg = "位于 Windows 受保护目录，但签名未通过验证；" + msg
+	}
+	return SignatureResult{Status: "签名异常", Message: msg}
 }
 
 func verifyEmbeddedSignature(path string) (uint32, string) {
@@ -469,9 +471,19 @@ func isWindowsSystemPath(path string) bool {
 		return false
 	}
 
-	p := strings.ToLower(strings.TrimRight(path, `\/`))
-	root := strings.ToLower(strings.TrimRight(windowsDir, `\/`))
-	return p == root || strings.HasPrefix(p, root+`\`)
+	p := strings.ToLower(filepath.Clean(strings.TrimRight(path, `\/`)))
+	root := strings.ToLower(filepath.Clean(strings.TrimRight(windowsDir, `\/`)))
+	trustedRoots := []string{
+		filepath.Join(root, "system32"),
+		filepath.Join(root, "syswow64"),
+		filepath.Join(root, "winsxs"),
+	}
+	for _, trustedRoot := range trustedRoots {
+		if p == trustedRoot || strings.HasPrefix(p, trustedRoot+`\`) {
+			return true
+		}
+	}
+	return false
 }
 
 func windowsDirectory() string {

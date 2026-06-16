@@ -749,6 +749,7 @@ func limitProcesses(items []process.Info, connectionsByPID map[uint32][]process.
 			"parentName":      item.ParentName,
 			"createdAt":       item.CreatedAt,
 			"path":            item.Path,
+			"commandLine":     trimText(item.CommandLine, 800),
 			"md5":             item.MD5,
 			"signature":       item.Signature,
 			"signatureMsg":    trimText(item.SignatureMsg, 260),

@@ -41,7 +41,10 @@ func BuildFindings(processes []process.Info, snapshot host.Snapshot) []Finding {
 			continue
 		}
 		name := fmt.Sprintf("%s (PID %d)", item.Name, item.PID)
-		command := item.Path
+		command := strings.TrimSpace(item.CommandLine)
+		if command == "" {
+			command = item.Path
+		}
 		extra := fmt.Sprintf("父进程: %s (%d), 连接数: %d", item.ParentName, item.ParentPID, item.ConnectionCount)
 		findings = append(findings, executableFindings("进程", name, item.MD5, item.Signature, item.SignatureMsg, item.Path, command, item.HashError, item.PathError, extra, item.ConnectionCount)...)
 	}
@@ -112,6 +115,24 @@ func executableFindings(source, name, md5, signature, signatureMsg, path, comman
 	var findings []Finding
 	if source == "进程" && selfidentity.IsSelfExecutablePath(path) {
 		return findings
+	}
+	if signature == signatureSystem && isSuspiciousSystemCommand(name, command) {
+		level := levelMedium
+		if connectionCount > 0 {
+			level = levelHigh
+		}
+		findings = append(findings, Finding{
+			Level:        level,
+			Source:       source,
+			Name:         name,
+			Reason:       "系统工具命令行可疑",
+			MD5:          md5,
+			Signature:    signature,
+			SignatureMsg: signatureMsg,
+			Path:         path,
+			Command:      command,
+			Extra:        extra,
+		})
 	}
 	if signature == signatureSystem {
 		return findings
@@ -189,6 +210,33 @@ func executableFindings(source, name, md5, signature, signatureMsg, path, comman
 	}
 
 	return findings
+}
+
+func isSuspiciousSystemCommand(name, command string) bool {
+	lowerName := strings.ToLower(name)
+	lowerCommand := strings.ToLower(command)
+	if lowerCommand == "" {
+		return false
+	}
+	isTool := false
+	for _, marker := range []string{"powershell", "pwsh", "cmd.exe", "wscript", "cscript", "mshta", "rundll32", "regsvr32", "certutil", "bitsadmin", "wmic"} {
+		if strings.Contains(lowerName, marker) || strings.Contains(lowerCommand, marker) {
+			isTool = true
+			break
+		}
+	}
+	if !isTool {
+		return false
+	}
+	for _, marker := range []string{
+		" -enc", "-encodedcommand", "frombase64string", "downloadstring", "invoke-webrequest", "invoke-expression", " iex",
+		"http://", "https://", ".ps1", ".vbs", ".js", ".jse", ".hta", ".dll", " -nop", " -w hidden", " /c ",
+	} {
+		if strings.Contains(lowerCommand, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isExpectedProtectedProcessNoise(name, path, md5, signature, hashError, pathError string) bool {

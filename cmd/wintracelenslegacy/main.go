@@ -14,7 +14,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
@@ -33,11 +35,13 @@ var version = "1.0.0-legacy"
 
 var navItems = []string{"进程信息", "主机信息", "关注项", "事件日志", "历史通信", "文件痕迹", "AI分析"}
 
+var shellExecuteW = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
+
 const (
 	defaultWindowX      = 40
 	defaultWindowY      = 40
-	defaultWindowWidth  = 1260
-	defaultWindowHeight = 780
+	defaultWindowWidth  = 1000
+	defaultWindowHeight = 680
 )
 
 var processColumns = []tableColumn{
@@ -54,6 +58,7 @@ var processColumns = []tableColumn{
 	{"父进程", 140},
 	{"创建时间", 150},
 	{"路径", 420},
+	{"命令行", 460},
 	{"错误", 260},
 }
 
@@ -452,12 +457,12 @@ func (a *legacyApp) run() error {
 		AssignTo: &a.mw,
 		Title:    "WinTraceLens Legacy",
 		Bounds:   defaultDeclarativeBounds(),
-		MinSize:  Size{Width: 900, Height: 600},
+		MinSize:  Size{Width: 760, Height: 500},
 		Font:     Font{Family: "Microsoft YaHei UI", PointSize: 9},
 		Background: SolidColorBrush{
 			Color: walk.RGB(240, 243, 247),
 		},
-		Layout: VBox{Margins: Margins{Left: 12, Top: 12, Right: 12, Bottom: 8}, Spacing: 10},
+		Layout: VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 8}, Spacing: 8},
 		Children: []Widget{
 			a.header(),
 			a.contentArea(),
@@ -489,7 +494,7 @@ func (a *legacyApp) run() error {
 func (a *legacyApp) header() Widget {
 	return Composite{
 		Background: SolidColorBrush{Color: walk.RGB(30, 48, 71)},
-		Layout:     HBox{Margins: Margins{Left: 16, Top: 14, Right: 16, Bottom: 14}, Spacing: 12},
+		Layout:     HBox{Margins: Margins{Left: 14, Top: 10, Right: 14, Bottom: 10}, Spacing: 10},
 		Children: []Widget{
 			Composite{
 				MinSize:    Size{Width: 5},
@@ -499,7 +504,7 @@ func (a *legacyApp) header() Widget {
 				StretchFactor: 1,
 				Layout:        VBox{MarginsZero: true, Spacing: 4},
 				Children: []Widget{
-					Label{Text: "WinTraceLens Legacy", Font: Font{Family: "Microsoft YaHei UI", PointSize: 15, Bold: true}, TextColor: walk.RGB(255, 255, 255)},
+					Label{Text: "WinTraceLens Legacy", Font: Font{Family: "Microsoft YaHei UI", PointSize: 14, Bold: true}, TextColor: walk.RGB(255, 255, 255)},
 					Label{Text: "Windows 7 / Server 2012 专用原生界面。模块首次打开会自动采集，耗时操作会在后台执行。", TextColor: walk.RGB(192, 204, 219)},
 				},
 			},
@@ -531,10 +536,40 @@ func (a *legacyApp) restoreWindow() {
 	a.setStatus("窗口已恢复到默认大小。")
 }
 
+func (a *legacyApp) openSystemTool(label, target string) {
+	file, err := syscall.UTF16PtrFromString(target)
+	if err != nil {
+		a.showError("打开"+label+"失败", err)
+		return
+	}
+	verb, _ := syscall.UTF16PtrFromString("open")
+	var hwnd uintptr
+	if a.mw != nil {
+		hwnd = uintptr(a.mw.Handle())
+	}
+	ret, _, callErr := shellExecuteW.Call(
+		hwnd,
+		uintptr(unsafe.Pointer(verb)),
+		uintptr(unsafe.Pointer(file)),
+		0,
+		0,
+		uintptr(win.SW_SHOWNORMAL),
+	)
+	if ret <= 32 {
+		if ret == 0 && callErr != syscall.Errno(0) {
+			a.showError("打开"+label+"失败", callErr)
+			return
+		}
+		a.showError("打开"+label+"失败", fmt.Errorf("无法启动 %s，ShellExecute 返回码 %d", target, ret))
+		return
+	}
+	a.setStatus("已请求打开系统界面：" + label)
+}
+
 func (a *legacyApp) contentArea() Widget {
 	return Composite{
 		StretchFactor: 1,
-		Layout:        HBox{MarginsZero: true, Spacing: 10},
+		Layout:        HBox{MarginsZero: true, Spacing: 8},
 		Children: []Widget{
 			a.sideNav(),
 			TabWidget{
@@ -562,28 +597,28 @@ func (a *legacyApp) contentArea() Widget {
 						"基于进程、签名、路径、服务和启动项生成需要优先核查的条目。",
 						a.summaryBar(&a.findingSummary, "等待生成关注项。"),
 						a.findingToolbar(),
-						a.assignedTable(findingColumns, a.findingModel, &a.findingView),
+						a.assignedTableWithMinHeight(findingColumns, a.findingModel, &a.findingView, nil, nil, 180),
 					)},
 					{Title: "事件日志", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
 						"事件日志",
 						"默认读取最近 7 天常见安全事件，建议按时间范围缩小查询以减少旧机器压力。",
 						a.summaryBar(&a.eventSummary, "等待读取事件日志。"),
 						a.eventToolbar(),
-						a.assignedTableWithHandlerAndMenu(eventColumns, a.eventModel, &a.eventView, nil, a.eventContextMenu()),
+						a.assignedTableWithMinHeight(eventColumns, a.eventModel, &a.eventView, nil, a.eventContextMenu(), 180),
 					)},
 					{Title: "历史通信", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
 						"历史通信",
 						"汇总 Sysmon、DNS Client、WFP、防火墙日志和 DNS 缓存。DNS 缓存没有可靠时间和进程归属。",
 						a.summaryBar(&a.historySummary, "等待读取历史通信。"),
 						a.historyToolbar(),
-						a.assignedTableWithHandlerAndMenu(historyColumns, a.historyModel, &a.historyView, nil, a.historyContextMenu()),
+						a.assignedTableWithMinHeight(historyColumns, a.historyModel, &a.historyView, nil, a.historyContextMenu(), 180),
 					)},
 					{Title: "文件痕迹", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
 						"文件痕迹",
 						"查看最近修改文件、最近运行文件和 Temp 目录可疑文件。可填写 C:\\ 或指定目录缩小扫描范围。",
 						a.summaryBar(&a.fileTraceSummary, "等待扫描文件痕迹。"),
 						a.fileTraceToolbar(),
-						a.assignedTableWithHandlerAndMenu(fileTraceColumns, a.fileTraceModel, &a.fileTraceView, nil, a.fileTraceContextMenu()),
+						a.assignedTableWithMinHeight(fileTraceColumns, a.fileTraceModel, &a.fileTraceView, nil, a.fileTraceContextMenu(), 180),
 					)},
 					{Title: "AI分析", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
 						"AI分析",
@@ -600,7 +635,7 @@ func (a *legacyApp) contentArea() Widget {
 
 func (a *legacyApp) sideNav() Widget {
 	return Composite{
-		MinSize:    Size{Width: 172},
+		MinSize:    Size{Width: 136},
 		Background: SolidColorBrush{Color: walk.RGB(28, 42, 61)},
 		Layout:     VBox{Margins: Margins{Left: 10, Top: 12, Right: 10, Bottom: 12}, Spacing: 10},
 		Children: []Widget{
@@ -622,7 +657,7 @@ func (a *legacyApp) modulePage(title, detail string, summary Widget, toolbar Wid
 	return []Widget{
 		Composite{
 			Background: SolidColorBrush{Color: walk.RGB(255, 255, 255)},
-			Layout:     VBox{Margins: Margins{Left: 14, Top: 10, Right: 14, Bottom: 10}, Spacing: 8},
+			Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 8}, Spacing: 6},
 			Children: []Widget{
 				Label{Text: title, Font: Font{Family: "Microsoft YaHei UI", PointSize: 11, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
 				Label{Text: detail, TextColor: walk.RGB(86, 99, 118)},
@@ -637,7 +672,7 @@ func (a *legacyApp) modulePage(title, detail string, summary Widget, toolbar Wid
 func (a *legacyApp) summaryBar(assignTo **walk.Label, text string) Widget {
 	return Composite{
 		Background: SolidColorBrush{Color: walk.RGB(237, 245, 252)},
-		Layout:     HBox{Margins: Margins{Left: 10, Top: 6, Right: 10, Bottom: 6}},
+		Layout:     HBox{Margins: Margins{Left: 10, Top: 4, Right: 10, Bottom: 4}},
 		Children: []Widget{
 			Label{AssignTo: assignTo, Text: text, TextColor: walk.RGB(40, 74, 108), StretchFactor: 1},
 		},
@@ -659,25 +694,28 @@ func (a *legacyApp) processToolbar() Widget {
 }
 
 func (a *legacyApp) processPage() Widget {
-	return Composite{
+	return VSplitter{
 		StretchFactor: 1,
-		Layout:        VBox{MarginsZero: true, Spacing: 8},
+		HandleWidth:   5,
 		Children: []Widget{
-			a.assignedTableWithHandlerAndMenu(processColumns, a.processModel, &a.processView, a.onProcessSelected, a.processContextMenu()),
+			a.assignedTableWithMinHeight(processColumns, a.processModel, &a.processView, a.onProcessSelected, a.processContextMenu(), 220),
 			a.processDetailPanel(),
 		},
 	}
 }
 
 func (a *legacyApp) processDetailPanel() Widget {
-	return Composite{
-		MinSize:    Size{Height: 260},
-		Background: SolidColorBrush{Color: walk.RGB(242, 246, 251)},
-		Layout:     VBox{Margins: Margins{Left: 0, Top: 0, Right: 0, Bottom: 0}, Spacing: 6},
+	return ScrollView{
+		HorizontalFixed: true,
+		VerticalFixed:   false,
+		StretchFactor:   1,
+		MinSize:         Size{Height: 120},
+		Background:      SolidColorBrush{Color: walk.RGB(242, 246, 251)},
+		Layout:          VBox{Margins: Margins{Left: 0, Top: 0, Right: 0, Bottom: 0}, Spacing: 4},
 		Children: []Widget{
 			Composite{
 				Background: SolidColorBrush{Color: walk.RGB(255, 255, 255)},
-				Layout:     HBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 8}, Spacing: 8},
+				Layout:     HBox{Margins: Margins{Left: 12, Top: 6, Right: 12, Bottom: 6}, Spacing: 8},
 				Children: []Widget{
 					Label{Text: "进程详情", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
 					Label{AssignTo: &a.processDetail, Text: "选择进程后显示模块列表和网络连接。", TextColor: walk.RGB(70, 82, 98), StretchFactor: 1},
@@ -689,12 +727,13 @@ func (a *legacyApp) processDetailPanel() Widget {
 			TabWidget{
 				ContentMarginsZero: true,
 				StretchFactor:      1,
+				MinSize:            Size{Height: 100},
 				Pages: []TabPage{
 					{Title: "模块列表", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-						a.assignedTableWithHandlerAndMenu(processModuleColumns, a.moduleModel, &a.moduleView, nil, a.moduleContextMenu()),
+						a.assignedTableWithMinHeight(processModuleColumns, a.moduleModel, &a.moduleView, nil, a.moduleContextMenu(), 90),
 					}},
 					{Title: "网络连接", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-						a.assignedTableWithHandlerAndMenu(processConnectionColumns, a.connModel, &a.connView, nil, a.connectionContextMenu()),
+						a.assignedTableWithMinHeight(processConnectionColumns, a.connModel, &a.connView, nil, a.connectionContextMenu(), 90),
 					}},
 				},
 			},
@@ -705,25 +744,36 @@ func (a *legacyApp) processDetailPanel() Widget {
 func (a *legacyApp) hostToolbar() Widget {
 	return Composite{
 		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
-		Layout:     HBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 7},
+		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
 		Children: []Widget{
-			PushButton{Text: "服务", MinSize: Size{Width: 72}, OnClicked: func() { a.setHostKind("services") }},
-			PushButton{Text: "计划任务", MinSize: Size{Width: 84}, OnClicked: func() { a.setHostKind("tasks") }},
-			PushButton{Text: "启动项", MinSize: Size{Width: 72}, OnClicked: func() { a.setHostKind("startup") }},
-			PushButton{Text: "用户", MinSize: Size{Width: 62}, OnClicked: func() { a.setHostKind("users") }},
-			PushButton{Text: "镜像劫持", MinSize: Size{Width: 84}, OnClicked: func() { a.setHostKind("ifeo") }},
-			PushButton{Text: "持久化", MinSize: Size{Width: 78}, OnClicked: func() { a.setHostKind("persistence") }},
-			Label{Text: "关键字", TextColor: walk.RGB(50, 67, 89)},
-			LineEdit{AssignTo: &a.hostSearch, StretchFactor: 1, OnTextChanged: a.applyHostFilter},
-			Label{Text: "服务 / 任务 / 启动项 / 用户 / 路径", TextColor: walk.RGB(112, 122, 138)},
-			PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshHost},
-			PushButton{Text: "导出当前表", MinSize: Size{Width: 110}, OnClicked: a.exportCurrentHostTable},
+			Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
+				PushButton{Text: "服务", MinSize: Size{Width: 72}, OnClicked: func() { a.setHostKind("services") }},
+				PushButton{Text: "计划任务", MinSize: Size{Width: 84}, OnClicked: func() { a.setHostKind("tasks") }},
+				PushButton{Text: "启动项", MinSize: Size{Width: 72}, OnClicked: func() { a.setHostKind("startup") }},
+				PushButton{Text: "用户", MinSize: Size{Width: 62}, OnClicked: func() { a.setHostKind("users") }},
+				PushButton{Text: "镜像劫持", MinSize: Size{Width: 84}, OnClicked: func() { a.setHostKind("ifeo") }},
+				PushButton{Text: "持久化", MinSize: Size{Width: 78}, OnClicked: func() { a.setHostKind("persistence") }},
+				Label{Text: "关键字", TextColor: walk.RGB(50, 67, 89)},
+				LineEdit{AssignTo: &a.hostSearch, StretchFactor: 1, OnTextChanged: a.applyHostFilter},
+				PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshHost},
+				PushButton{Text: "导出当前表", MinSize: Size{Width: 110}, OnClicked: a.exportCurrentHostTable},
+			}},
+			Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
+				Label{Text: "打开系统界面", TextColor: walk.RGB(50, 67, 89)},
+				PushButton{Text: "服务管理器", MinSize: Size{Width: 92}, OnClicked: func() { a.openSystemTool("服务管理器", "services.msc") }},
+				PushButton{Text: "任务计划程序", MinSize: Size{Width: 104}, OnClicked: func() { a.openSystemTool("任务计划程序", "taskschd.msc") }},
+				PushButton{Text: "系统配置启动项", MinSize: Size{Width: 118}, OnClicked: func() { a.openSystemTool("系统配置启动项", "msconfig.exe") }},
+				PushButton{Text: "本地用户和组", MinSize: Size{Width: 104}, OnClicked: func() { a.openSystemTool("本地用户和组", "lusrmgr.msc") }},
+				PushButton{Text: "注册表", MinSize: Size{Width: 76}, OnClicked: func() { a.openSystemTool("注册表", "regedit.exe") }},
+				HSpacer{},
+				Label{Text: "用于与本工具采集结果对比", TextColor: walk.RGB(112, 122, 138)},
+			}},
 		},
 	}
 }
 
 func (a *legacyApp) hostTable() Widget {
-	return a.assignedTable(hostColumns, a.hostModel, &a.hostView)
+	return a.assignedTableWithMinHeight(hostColumns, a.hostModel, &a.hostView, nil, nil, 180)
 }
 
 func (a *legacyApp) findingToolbar() Widget {
@@ -908,12 +958,21 @@ func (a *legacyApp) assignedTableWithHandler(columns []tableColumn, model *table
 }
 
 func (a *legacyApp) assignedTableWithHandlerAndMenu(columns []tableColumn, model *tableModel, assignTo **walk.TableView, onCurrent walk.EventHandler, menu []MenuItem) Widget {
+	return a.assignedTableWithMinHeight(columns, model, assignTo, onCurrent, menu, 0)
+}
+
+func (a *legacyApp) assignedTableWithMinHeight(columns []tableColumn, model *tableModel, assignTo **walk.TableView, onCurrent walk.EventHandler, menu []MenuItem, minHeight int) Widget {
+	minSize := Size{}
+	if minHeight > 0 {
+		minSize = Size{Height: minHeight}
+	}
 	return TableView{
 		AssignTo:                    assignTo,
 		Background:                  SolidColorBrush{Color: walk.RGB(255, 255, 255)},
 		ContextMenuItems:            menu,
 		Columns:                     toTableViewColumns(columns),
 		Model:                       model,
+		MinSize:                     minSize,
 		AlternatingRowBG:            true,
 		LastColumnStretched:         false,
 		SelectionHiddenWithoutFocus: false,
@@ -2040,6 +2099,7 @@ func processRows(items []process.Info) [][]string {
 			item.ParentName,
 			item.CreatedAt,
 			item.Path,
+			item.CommandLine,
 			strings.TrimSpace(item.HashError + " " + item.PathError),
 		})
 	}

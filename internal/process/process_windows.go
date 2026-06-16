@@ -3,6 +3,8 @@
 package process
 
 import (
+	"bytes"
+	"encoding/csv"
 	"fmt"
 	"os"
 	"runtime"
@@ -10,7 +12,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
 	"unsafe"
+
+	"github.com/ruiwenya/WinTraceLens/internal/winexec"
 )
 
 const (
@@ -107,6 +112,7 @@ func Collect(opts Options) ([]Info, error) {
 			connectionCount[connection.PID]++
 		}
 	}
+	commandLines := queryProcessCommandLines()
 	cpuStart := sampleProcessCPU(entries)
 	sampleStartedAt := time.Now()
 	time.Sleep(350 * time.Millisecond)
@@ -155,6 +161,7 @@ func Collect(opts Options) ([]Info, error) {
 			ParentPID:       entry.ParentProcessID,
 			ParentName:      names[entry.ParentProcessID],
 			CreatedAt:       formatTime(createdAt),
+			CommandLine:     commandLines[entry.ProcessID],
 			Path:            path,
 			FileCreated:     formatTime(fileCreated),
 			FileModified:    formatTime(fileModified),
@@ -176,6 +183,92 @@ func Collect(opts Options) ([]Info, error) {
 	})
 
 	return items, nil
+}
+
+func queryProcessCommandLines() map[uint32]string {
+	cmd := winexec.Command("wmic.exe", "process", "get", "ProcessId,CommandLine", "/format:csv")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	reader := csv.NewReader(bytes.NewReader([]byte(decodeCommandOutput(out))))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	records, err := reader.ReadAll()
+	if err != nil || len(records) < 2 {
+		return nil
+	}
+
+	header := records[0]
+	index := make(map[string]int, len(header))
+	for i, name := range header {
+		index[strings.TrimSpace(name)] = i
+	}
+	pidIndex, hasPID := index["ProcessId"]
+	commandIndex, hasCommand := index["CommandLine"]
+	if !hasPID || !hasCommand {
+		return nil
+	}
+
+	outMap := make(map[uint32]string, len(records)-1)
+	for _, record := range records[1:] {
+		if pidIndex < 0 || pidIndex >= len(record) || commandIndex < 0 || commandIndex >= len(record) {
+			continue
+		}
+		pidValue := strings.TrimSpace(record[pidIndex])
+		if pidValue == "" {
+			continue
+		}
+		var pid uint64
+		if _, err := fmt.Sscanf(pidValue, "%d", &pid); err != nil || pid == 0 {
+			continue
+		}
+		outMap[uint32(pid)] = strings.TrimSpace(record[commandIndex])
+	}
+	return outMap
+}
+
+func decodeCommandOutput(raw []byte) string {
+	if len(raw) >= 2 {
+		if raw[0] == 0xff && raw[1] == 0xfe {
+			return decodeUTF16LE(raw[2:])
+		}
+		if raw[0] == 0xfe && raw[1] == 0xff {
+			u16 := make([]uint16, 0, (len(raw)-2)/2)
+			for i := 2; i+1 < len(raw); i += 2 {
+				u16 = append(u16, uint16(raw[i])<<8|uint16(raw[i+1]))
+			}
+			return string(utf16.Decode(u16))
+		}
+	}
+	if looksUTF16LE(raw) {
+		return decodeUTF16LE(raw)
+	}
+	return string(raw)
+}
+
+func looksUTF16LE(raw []byte) bool {
+	if len(raw) < 4 {
+		return false
+	}
+	checked := 0
+	zeros := 0
+	for i := 1; i < len(raw) && checked < 200; i += 2 {
+		checked++
+		if raw[i] == 0 {
+			zeros++
+		}
+	}
+	return checked > 0 && zeros*100/checked > 60
+}
+
+func decodeUTF16LE(raw []byte) string {
+	u16 := make([]uint16, 0, len(raw)/2)
+	for i := 0; i+1 < len(raw); i += 2 {
+		u16 = append(u16, uint16(raw[i])|uint16(raw[i+1])<<8)
+	}
+	return string(utf16.Decode(u16))
 }
 
 func Modules(pid uint32, opts Options) ([]ModuleInfo, error) {

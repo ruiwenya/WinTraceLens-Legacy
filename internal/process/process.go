@@ -6,6 +6,7 @@ type Info struct {
 	ParentPID       uint32 `json:"parentPid"`
 	ParentName      string `json:"parentName"`
 	CreatedAt       string `json:"createdAt"`
+	CommandLine     string `json:"commandLine"`
 	Path            string `json:"path"`
 	FileCreated     string `json:"fileCreated"`
 	FileModified    string `json:"fileModified"`
