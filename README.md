@@ -26,19 +26,6 @@ WinTraceLens Legacy 是面向 Windows 7、Windows Server 2012 / 2012 R2 等旧�
 
 建议以管理员权限运行。非管理员权限下，安全日志、服务、计划任务、部分进程路径、模块列表和签名信息可能不完整。
 
-## 构建要求
-
-Legacy 版本需要使用 Go 1.20.x 构建。不要使用 Go 1.21+ 构建面向 Windows 7 / Server 2012 的版本，因为后续 Go 版本已经不再支持这些旧系统。
-
-示例构建命令：
-
-```powershell
-cd D:\codex-program\sec-analysis\wintracelens-legacy
-C:\Users\sdk\go1.20.14\bin\go.exe test ./...
-C:\Users\sdk\go1.20.14\bin\go.exe build -ldflags="-H windowsgui" -o dist\WinTraceLens-legacy.exe .\cmd\wintracelenslegacy
-```
-
-如果本机已经把 Go 1.20.x 加入 PATH，也可以把上面的完整路径替换为 `go`。
 
 ## 第三方依赖
 
@@ -50,18 +37,6 @@ C:\Users\sdk\go1.20.14\bin\go.exe build -ldflags="-H windowsgui" -o dist\WinTrac
 
 上传 GitHub 时应保留 `third_party/walk/LICENSE` 和相关源码，确保第三方许可证随代码一起分发。
 
-## 冒烟测试
-
-1. 在测试机上右键“以管理员身份运行” `WinTraceLens-legacy.exe`。
-2. 确认窗口可以打开，首页“进程信息”自动加载。
-3. 查看进程列表是否显示进程路径、MD5、签名、CPU、内存、线程、句柄和连接数。
-4. 选择一个进程，确认“模块列表”和“网络连接”能返回结果。
-5. 切换“主机信息”，检查服务、计划任务、启动项、用户、镜像劫持和持久化项。
-6. 切换“关注项”，确认不会明显误报 WinTraceLens 自身进程。
-7. 切换“事件日志”，选择较小时间范围，确认登录成功、登录失败、RDP、服务创建、用户创建和 PowerShell 分类可用。
-8. 切换“历史通信”，确认 DNS、ARP、路由、netstat 和可用事件日志证据可以展示。
-9. 切换“文件痕迹”，确认默认扫描和指定目录扫描可用。
-10. 测试任意页面“导出 CSV”和顶部“导出取证包”。
 
 ## 兼容性说明
 
@@ -70,18 +45,6 @@ C:\Users\sdk\go1.20.14\bin\go.exe build -ldflags="-H windowsgui" -o dist\WinTrac
 - 事件日志是否完整取决于系统审计策略、日志保留时间和当前用户权限。
 - AI 分析需要用户自行填写 API Key。程序不内置第三方 API Key，也不应把 API Key 提交到源码仓库。
 - 在低配置虚拟机或旧服务器上，大范围文件扫描、事件日志扫描和取证包导出可能耗时较长，建议先缩小时间范围或扫描目录。
-
-## 反馈信息
-
-如果测试失败，请记录：
-
-- 系统版本和位数
-- 是否管理员权限运行
-- 失败模块和操作步骤
-- 弹窗错误原文或截图
-- 是否安装 PowerShell 2.0 / 3.0+
-- CSV 是否中文乱码
-- 事件日志是否能读取到登录、RDP、服务、PowerShell 等记录
 
 ## 使用边界
 
