@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -315,7 +316,113 @@ foreach ($err in @($errors | Select-Object -Unique)) {
 		return Snapshot{}, errors.New(msg)
 	}
 
-	return parseLineSnapshot(out)
+	snapshot, err := parseLineSnapshot(out)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	// Prefetch and Recent LNK are collected again below with native parsers.
+	// Drop the metadata-only PowerShell rows so a single source has a single
+	// time interpretation in the UI.
+	baseRecords := snapshot.Records[:0]
+	for _, item := range snapshot.Records {
+		if item.Source == "Prefetch" || item.Source == "Recent 快捷方式" {
+			continue
+		}
+		baseRecords = append(baseRecords, item)
+	}
+	snapshot.Records = baseRecords
+
+	since := time.Now().Add(-time.Duration(hours) * time.Hour)
+	fileArtifacts := collectTraditionalFileArtifacts(maxRecords, since)
+	registryArtifacts := collectTraditionalRegistryArtifacts(maxRecords)
+	ntfsLimit := maxRecords / 4
+	if ntfsLimit < 100 {
+		ntfsLimit = 100
+	}
+	ntfsRecords, ntfsWarnings := collectNTFSArtifacts(opts.ModifiedRoots, ntfsLimit, since)
+
+	extraRecords := append(fileArtifacts.records, registryArtifacts.records...)
+	extraRecords = append(extraRecords, ntfsRecords...)
+	snapshot.Records = mergeLegacyTraceRecords(snapshot.Records, extraRecords, maxRecords)
+	snapshot.CollectionErrors = append(snapshot.CollectionErrors, fileArtifacts.warnings...)
+	snapshot.CollectionErrors = append(snapshot.CollectionErrors, registryArtifacts.warnings...)
+	snapshot.CollectionErrors = append(snapshot.CollectionErrors, ntfsWarnings...)
+	snapshot.CollectionErrors = compactErrors(snapshot.CollectionErrors, 30)
+	return snapshot, nil
+}
+
+func mergeLegacyTraceRecords(existing, extra []Record, limit int) []Record {
+	if limit <= 0 {
+		limit = 500
+	}
+	all := append(append([]Record(nil), extra...), existing...)
+	sort.SliceStable(all, func(i, j int) bool {
+		return recordTimestamp(all[i]).After(recordTimestamp(all[j]))
+	})
+	selected := make([]Record, 0, limit)
+	seen := make(map[string]bool, len(all))
+	add := func(item Record) {
+		if len(selected) >= limit {
+			return
+		}
+		key := strings.ToLower(strings.Join([]string{
+			item.Category, item.Source, item.Path, item.Name, item.EvidenceTime, item.LastRun,
+		}, "|"))
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		selected = append(selected, item)
+	}
+
+	// Status records make unsupported, disabled and empty sources explicit on
+	// Win7/Server systems, so preserve them before high-volume USN/Amcache rows.
+	for _, item := range extra {
+		if item.Category == "取证源状态" {
+			add(item)
+		}
+	}
+	for _, source := range []string{"Prefetch", "Recent LNK", "JumpList", "UserAssist", "PCA 执行记录", "Shimcache 路径提取", "SRUM 证据定位", "PowerShell PSReadLine", "MFT 证据定位"} {
+		quota := limit / 20
+		if quota < 10 {
+			quota = 10
+		}
+		for _, item := range all {
+			if quota <= 0 {
+				break
+			}
+			if item.Source == source {
+				before := len(selected)
+				add(item)
+				if len(selected) > before {
+					quota--
+				}
+			}
+		}
+	}
+	for _, source := range []string{"USN Journal", "Amcache 在线注册表"} {
+		quota := limit / 5
+		if quota < 30 {
+			quota = 30
+		}
+		for _, item := range all {
+			if quota <= 0 {
+				break
+			}
+			if item.Source == source {
+				before := len(selected)
+				add(item)
+				if len(selected) > before {
+					quota--
+				}
+			}
+		}
+	}
+	for _, item := range all {
+		add(item)
+	}
+	return selected
 }
 
 func parseLineSnapshot(out []byte) (Snapshot, error) {
@@ -344,7 +451,7 @@ func parseLineSnapshot(out []byte) (Snapshot, error) {
 				continue
 			}
 			size, _ := strconv.ParseInt(fields[6], 10, 64)
-			snapshot.Records = append(snapshot.Records, Record{
+			record := Record{
 				Category:  fields[0],
 				Source:    fields[1],
 				Name:      fields[2],
@@ -360,7 +467,12 @@ func parseLineSnapshot(out []byte) (Snapshot, error) {
 				Suspicion: fields[12],
 				Reason:    fields[13],
 				Details:   fields[14],
-			})
+			}
+			if record.Modified != "" && (record.Category == "Temp 临时文件" || record.Category == "最近修改文件") {
+				record.EvidenceTime = record.Modified
+				record.TimeMeaning = "文件系统最后写入时间，不代表文件执行时间"
+			}
+			snapshot.Records = append(snapshot.Records, record)
 		case "E":
 			if len(parts) >= 2 {
 				value, err := decodeField(parts[1])

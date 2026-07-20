@@ -23,6 +23,8 @@ func Collect(opts Options) (Snapshot, error) {
 		maxRecords = 5000
 	}
 
+	return collectNativeHistory(opts, maxRecords)
+
 	startRaw := psDateLiteral(opts.StartTime)
 	endRaw := psDateLiteral(opts.EndTime)
 

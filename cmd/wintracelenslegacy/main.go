@@ -24,16 +24,17 @@ import (
 
 	"github.com/ruiwenya/WinTraceLens/internal/aianalysis"
 	"github.com/ruiwenya/WinTraceLens/internal/analysis"
+	"github.com/ruiwenya/WinTraceLens/internal/driveranalysis"
 	"github.com/ruiwenya/WinTraceLens/internal/filetrace"
 	"github.com/ruiwenya/WinTraceLens/internal/history"
 	"github.com/ruiwenya/WinTraceLens/internal/host"
+	"github.com/ruiwenya/WinTraceLens/internal/memoryscan"
 	"github.com/ruiwenya/WinTraceLens/internal/process"
 	"github.com/ruiwenya/WinTraceLens/internal/securitylog"
+	"github.com/ruiwenya/WinTraceLens/internal/threatanalysis"
 )
 
 var version = "1.0.0-legacy"
-
-var navItems = []string{"进程信息", "主机信息", "关注项", "事件日志", "历史通信", "文件痕迹", "AI分析"}
 
 var shellExecuteW = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
 
@@ -64,6 +65,7 @@ var processColumns = []tableColumn{
 
 var processModuleColumns = []tableColumn{
 	{"模块", 180},
+	{"类型", 110},
 	{"MD5", 250},
 	{"签名", 120},
 	{"基址", 120},
@@ -162,6 +164,40 @@ var findingColumns = []tableColumn{
 	{"补充信息", 380},
 }
 
+var memoryColumns = []tableColumn{
+	{"级别", 70},
+	{"分类", 110},
+	{"PID", 74},
+	{"进程", 150},
+	{"路径", 360},
+	{"原因", 280},
+	{"基址", 120},
+	{"大小KB", 90},
+	{"保护属性", 120},
+	{"内存类型", 100},
+	{"线程ID", 80},
+	{"上下文", 240},
+	{"详情", 420},
+}
+
+var driverColumns = []tableColumn{
+	{"级别", 70},
+	{"评分", 70},
+	{"驱动", 190},
+	{"类型", 120},
+	{"签名", 130},
+	{"MD5", 250},
+	{"路径", 400},
+	{"服务", 180},
+	{"启动", 90},
+	{"加载事件", 320},
+	{"多源差异", 280},
+	{"原因", 380},
+	{"证据", 420},
+	{"基址", 120},
+	{"错误", 260},
+}
+
 var eventColumns = []tableColumn{
 	{"时间", 150},
 	{"分类", 110},
@@ -197,9 +233,12 @@ var fileTraceColumns = []tableColumn{
 	{"文件名", 220},
 	{"可疑", 70},
 	{"原因", 220},
+	{"证据时间", 150},
+	{"时间含义", 300},
 	{"修改时间", 150},
 	{"最近运行", 150},
 	{"运行次数", 80},
+	{"SHA1", 290},
 	{"大小KB", 80},
 	{"扩展名", 80},
 	{"路径", 460},
@@ -298,7 +337,6 @@ func (m *tableModel) Headers() []string {
 type legacyApp struct {
 	mw             *walk.MainWindow
 	mainTabs       *walk.TabWidget
-	navList        *walk.ListBox
 	status         *walk.Label
 	hashLimitBytes int64
 	processStarted bool
@@ -356,9 +394,16 @@ type legacyApp struct {
 
 	findingSearch  *walk.LineEdit
 	findingSummary *walk.Label
+	findingTabs    *walk.TabWidget
 	findingModel   *tableModel
 	findingView    *walk.TableView
 	findingRows    [][]string
+	memoryModel    *tableModel
+	memoryView     *walk.TableView
+	memoryRows     [][]string
+	driverModel    *tableModel
+	driverView     *walk.TableView
+	driverRows     [][]string
 
 	eventSearch   *walk.LineEdit
 	eventSummary  *walk.Label
@@ -384,6 +429,7 @@ type legacyApp struct {
 
 	fileTraceStarted  bool
 	fileTraceSearch   *walk.LineEdit
+	fileTraceKind     *walk.ComboBox
 	fileTraceSummary  *walk.Label
 	fileTraceHours    *walk.LineEdit
 	fileTraceMax      *walk.LineEdit
@@ -445,6 +491,8 @@ func newLegacyApp(hashLimitBytes int64) *legacyApp {
 		ifeoModel:        newTableModel(ifeoColumns),
 		persistenceModel: newTableModel(persistenceColumns),
 		findingModel:     newTableModel(findingColumns),
+		memoryModel:      newTableModel(memoryColumns),
+		driverModel:      newTableModel(driverColumns),
 		eventModel:       newTableModel(eventColumns),
 		eventCategory:    "all",
 		historyModel:     newTableModel(historyColumns),
@@ -567,88 +615,61 @@ func (a *legacyApp) openSystemTool(label, target string) {
 }
 
 func (a *legacyApp) contentArea() Widget {
-	return Composite{
-		StretchFactor: 1,
-		Layout:        HBox{MarginsZero: true, Spacing: 8},
-		Children: []Widget{
-			a.sideNav(),
-			TabWidget{
-				AssignTo:              &a.mainTabs,
-				ContentMarginsZero:    true,
-				StretchFactor:         1,
-				OnCurrentIndexChanged: a.onMainTabChanged,
-				Pages: []TabPage{
-					{Title: "进程信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-						"进程信息",
-						"查看进程路径、父进程、CPU、内存、线程、句柄、MD5、签名状态和当前网络连接数量。",
-						a.summaryBar(&a.processSummary, "等待采集进程信息。"),
-						a.processToolbar(),
-						a.processPage(),
-					)},
-					{Title: "主机信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-						"主机信息",
-						"汇总服务、计划任务、启动项、本地用户和镜像劫持，适合快速检查持久化位置。",
-						a.summaryBar(&a.hostSummary, "等待采集主机信息。"),
-						a.hostToolbar(),
-						a.hostTable(),
-					)},
-					{Title: "关注项", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-						"关注项",
-						"基于进程、签名、路径、服务和启动项生成需要优先核查的条目。",
-						a.summaryBar(&a.findingSummary, "等待生成关注项。"),
-						a.findingToolbar(),
-						a.assignedTableWithMinHeight(findingColumns, a.findingModel, &a.findingView, nil, nil, 180),
-					)},
-					{Title: "事件日志", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-						"事件日志",
-						"默认读取最近 7 天常见安全事件，建议按时间范围缩小查询以减少旧机器压力。",
-						a.summaryBar(&a.eventSummary, "等待读取事件日志。"),
-						a.eventToolbar(),
-						a.assignedTableWithMinHeight(eventColumns, a.eventModel, &a.eventView, nil, a.eventContextMenu(), 180),
-					)},
-					{Title: "历史通信", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-						"历史通信",
-						"汇总 Sysmon、DNS Client、WFP、防火墙日志和 DNS 缓存。DNS 缓存没有可靠时间和进程归属。",
-						a.summaryBar(&a.historySummary, "等待读取历史通信。"),
-						a.historyToolbar(),
-						a.assignedTableWithMinHeight(historyColumns, a.historyModel, &a.historyView, nil, a.historyContextMenu(), 180),
-					)},
-					{Title: "文件痕迹", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-						"文件痕迹",
-						"查看最近修改文件、最近运行文件和 Temp 目录可疑文件。可填写 C:\\ 或指定目录缩小扫描范围。",
-						a.summaryBar(&a.fileTraceSummary, "等待扫描文件痕迹。"),
-						a.fileTraceToolbar(),
-						a.assignedTableWithMinHeight(fileTraceColumns, a.fileTraceModel, &a.fileTraceView, nil, a.fileTraceContextMenu(), 180),
-					)},
-					{Title: "AI分析", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-						"AI分析",
-						"选择在线模型后，把当前采集结果发送给 AI 辅助判断异常点和下一步排查方向。API Key 仅保存在本次运行内存中。",
-						a.summaryBar(&a.aiSummary, "等待配置 AI 分析。"),
-						a.aiToolbar(),
-						a.aiPage(),
-					)},
-				},
-			},
-		},
-	}
-}
-
-func (a *legacyApp) sideNav() Widget {
-	return Composite{
-		MinSize:    Size{Width: 136},
-		Background: SolidColorBrush{Color: walk.RGB(28, 42, 61)},
-		Layout:     VBox{Margins: Margins{Left: 10, Top: 12, Right: 10, Bottom: 12}, Spacing: 10},
-		Children: []Widget{
-			Label{Text: "功能导航", Font: Font{Family: "Microsoft YaHei UI", PointSize: 10, Bold: true}, TextColor: walk.RGB(235, 241, 248)},
-			Label{Text: "选择模块后自动采集", TextColor: walk.RGB(155, 170, 190)},
-			ListBox{
-				AssignTo:              &a.navList,
-				Model:                 navItems,
-				CurrentIndex:          0,
-				StretchFactor:         1,
-				Background:            SolidColorBrush{Color: walk.RGB(245, 248, 252)},
-				OnCurrentIndexChanged: a.onNavChanged,
-			},
+	return TabWidget{
+		AssignTo:              &a.mainTabs,
+		ContentMarginsZero:    true,
+		StretchFactor:         1,
+		OnCurrentIndexChanged: a.onMainTabChanged,
+		Pages: []TabPage{
+			{Title: "进程信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"进程信息",
+				"查看进程路径、父进程、CPU、内存、线程、句柄、MD5、签名状态和当前网络连接数量。",
+				a.summaryBar(&a.processSummary, "等待采集进程信息。"),
+				a.processToolbar(),
+				a.processPage(),
+			)},
+			{Title: "主机信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"主机信息",
+				"汇总服务、计划任务、启动项、本地用户和镜像劫持，适合快速检查持久化位置。",
+				a.summaryBar(&a.hostSummary, "等待采集主机信息。"),
+				a.hostToolbar(),
+				a.hostTable(),
+			)},
+			{Title: "关注项", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"关注项",
+				"集中查看行为关联、进程内存异常和驱动多源核查结果；各列表均可按列排序。",
+				a.summaryBar(&a.findingSummary, "等待生成关注项。"),
+				a.findingToolbar(),
+				a.findingPage(),
+			)},
+			{Title: "事件日志", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"事件日志",
+				"默认读取最近 7 天常见安全事件，建议按时间范围缩小查询以减少旧机器压力。",
+				a.summaryBar(&a.eventSummary, "等待读取事件日志。"),
+				a.eventToolbar(),
+				a.assignedTableWithMinHeight(eventColumns, a.eventModel, &a.eventView, nil, a.eventContextMenu(), 180),
+			)},
+			{Title: "历史通信", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"历史通信",
+				"汇总 Sysmon、DNS Client、WFP、防火墙日志和 DNS 缓存。DNS 缓存没有可靠时间和进程归属。",
+				a.summaryBar(&a.historySummary, "等待读取历史通信。"),
+				a.historyToolbar(),
+				a.assignedTableWithMinHeight(historyColumns, a.historyModel, &a.historyView, nil, a.historyContextMenu(), 180),
+			)},
+			{Title: "文件痕迹", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"文件痕迹",
+				"查看近期文件及 Prefetch、Amcache、Shimcache、UserAssist、LNK/JumpList、USN/$MFT、SRUM 等传统痕迹。",
+				a.summaryBar(&a.fileTraceSummary, "等待扫描文件痕迹。"),
+				a.fileTraceToolbar(),
+				a.assignedTableWithMinHeight(fileTraceColumns, a.fileTraceModel, &a.fileTraceView, nil, a.fileTraceContextMenu(), 180),
+			)},
+			{Title: "AI分析", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"AI分析",
+				"选择在线模型后，把当前采集结果发送给 AI 辅助判断异常点和下一步排查方向。API Key 仅保存在本次运行内存中。",
+				a.summaryBar(&a.aiSummary, "等待配置 AI 分析。"),
+				a.aiToolbar(),
+				a.aiPage(),
+			)},
 		},
 	}
 }
@@ -785,7 +806,27 @@ func (a *legacyApp) findingToolbar() Widget {
 			LineEdit{AssignTo: &a.findingSearch, StretchFactor: 1, OnTextChanged: a.applyFindingFilter},
 			Label{Text: "级别 / 来源 / 原因 / MD5 / 路径", TextColor: walk.RGB(112, 122, 138)},
 			PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshFindings},
-			PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: func() { a.exportModel("findings", a.findingModel) }},
+			PushButton{Text: "导出当前表", MinSize: Size{Width: 104}, OnClicked: a.exportCurrentFindingTable},
+		},
+	}
+}
+
+func (a *legacyApp) findingPage() Widget {
+	return TabWidget{
+		AssignTo:              &a.findingTabs,
+		ContentMarginsZero:    true,
+		StretchFactor:         1,
+		OnCurrentIndexChanged: a.onFindingTabChanged,
+		Pages: []TabPage{
+			{Title: "综合风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
+				a.assignedTableWithMinHeight(findingColumns, a.findingModel, &a.findingView, nil, nil, 180),
+			}},
+			{Title: "内存异常", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
+				a.assignedTableWithMinHeight(memoryColumns, a.memoryModel, &a.memoryView, nil, nil, 180),
+			}},
+			{Title: "驱动风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
+				a.assignedTableWithMinHeight(driverColumns, a.driverModel, &a.driverView, nil, nil, 180),
+			}},
 		},
 	}
 }
@@ -854,6 +895,8 @@ func (a *legacyApp) fileTraceToolbar() Widget {
 				LineEdit{AssignTo: &a.fileTraceHours, Text: "72", MaxSize: Size{Width: 70}},
 				Label{Text: "条数", TextColor: walk.RGB(50, 67, 89)},
 				LineEdit{AssignTo: &a.fileTraceMax, Text: "500", MaxSize: Size{Width: 70}},
+				Label{Text: "取证源", TextColor: walk.RGB(50, 67, 89)},
+				ComboBox{AssignTo: &a.fileTraceKind, Model: fileTraceKindOptions(), CurrentIndex: 0, MinSize: Size{Width: 140}, MaxSize: Size{Width: 170}, OnCurrentIndexChanged: a.applyFileTraceFilter},
 				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
 				LineEdit{AssignTo: &a.fileTraceSearch, StretchFactor: 1, OnTextChanged: a.applyFileTraceFilter},
 				PushButton{Text: "开始扫描", MinSize: Size{Width: 92}, OnClicked: a.refreshFileTrace},
@@ -1009,7 +1052,7 @@ func (a *legacyApp) repaintCurrentTables() {
 	case 1:
 		tables = []*walk.TableView{a.hostView}
 	case 2:
-		tables = []*walk.TableView{a.findingView}
+		tables = []*walk.TableView{a.findingView, a.memoryView, a.driverView}
 	case 3:
 		tables = []*walk.TableView{a.eventView}
 	case 4:
@@ -1023,6 +1066,8 @@ func (a *legacyApp) repaintCurrentTables() {
 			a.connView,
 			a.hostView,
 			a.findingView,
+			a.memoryView,
+			a.driverView,
 			a.eventView,
 			a.historyView,
 			a.fileTraceView,
@@ -1040,6 +1085,8 @@ func (a *legacyApp) repaintAllTables() {
 		a.connView,
 		a.hostView,
 		a.findingView,
+		a.memoryView,
+		a.driverView,
 		a.eventView,
 		a.historyView,
 		a.fileTraceView,
@@ -1070,9 +1117,6 @@ func (a *legacyApp) onMainTabChanged() {
 	if a.mainTabs == nil {
 		return
 	}
-	if a.navList != nil && a.navList.CurrentIndex() != a.mainTabs.CurrentIndex() {
-		_ = a.navList.SetCurrentIndex(a.mainTabs.CurrentIndex())
-	}
 	switch a.mainTabs.CurrentIndex() {
 	case 0:
 		if !a.processStarted {
@@ -1101,18 +1145,6 @@ func (a *legacyApp) onMainTabChanged() {
 	}
 	a.repaintAfterNavigation()
 	a.scheduleRepaintAfterNavigation()
-}
-
-func (a *legacyApp) onNavChanged() {
-	if a.navList == nil || a.mainTabs == nil {
-		return
-	}
-	index := a.navList.CurrentIndex()
-	if index < 0 || index >= len(navItems) || a.mainTabs.CurrentIndex() == index {
-		return
-	}
-	a.repaintAfterNavigation()
-	_ = a.mainTabs.SetCurrentIndex(index)
 }
 
 func (a *legacyApp) onHostTabChanged() {
@@ -1213,7 +1245,7 @@ func (a *legacyApp) loadProcessDetails(pid uint32, name string, force bool) {
 		moduleRows := moduleRows(modules)
 		connRows := connectionRows(connections)
 		if moduleErr != nil {
-			moduleRows = append(moduleRows, []string{name, "", "", "", "", "", moduleErr.Error()})
+			moduleRows = append(moduleRows, []string{name, "读取失败", "", "", "", "", "", moduleErr.Error()})
 		}
 		if connectionErr != nil {
 			connRows = append(connRows, []string{"错误", "", "", connectionErr.Error(), "", "", ""})
@@ -1329,7 +1361,7 @@ func (a *legacyApp) historyContextMenu() []MenuItem {
 func (a *legacyApp) fileTraceContextMenu() []MenuItem {
 	return []MenuItem{
 		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.fileTraceView, a.fileTraceModel, "文件痕迹详情") }},
-		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.fileTraceView, a.fileTraceModel, 10, "路径") }},
+		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.fileTraceView, a.fileTraceModel, 13, "路径") }},
 		Action{Text: "复制原因", OnTriggered: func() { a.copyTableColumn(a.fileTraceView, a.fileTraceModel, 4, "原因") }},
 		Action{Text: "保存详情", OnTriggered: func() { a.saveTableRowDetails(a.fileTraceView, a.fileTraceModel, "file-trace-detail") }},
 		Separator{},
@@ -1490,28 +1522,42 @@ func (a *legacyApp) refreshHost() {
 
 func (a *legacyApp) refreshFindings() {
 	a.findingStarted = true
-	a.setStatus("正在进行关注项分析...")
+	a.setStatus("关注项 1/2：正在分析进程、持久化和内存异常...")
 	go func() {
-		processes, procErr := process.Collect(process.Options{HashLimitBytes: a.hashLimitBytes})
-		snapshot, hostErr := host.Collect(host.Options{HashLimitBytes: a.hashLimitBytes})
-		var err error
-		if procErr != nil {
-			err = fmt.Errorf("进程采集失败: %w", procErr)
-		} else if hostErr != nil {
-			err = fmt.Errorf("主机信息采集失败: %w", hostErr)
-		}
-		findings := analysis.BuildFindings(processes, snapshot)
-		rows := findingRows(findings)
+		threatSnapshot, threatErr := threatanalysis.Collect(threatanalysis.Options{
+			HashLimitBytes: a.hashLimitBytes,
+			MaxRecords:     500,
+			IncludeMemory:  true,
+		})
+		findingRows := threatRows(threatSnapshot.Items)
+		memoryRows := memoryFindingRows(threatSnapshot.MemoryRecords)
 		a.mw.Synchronize(func() {
-			if err != nil {
-				a.showError("关注项分析失败", err)
-				a.setStatus("关注项分析失败。")
-				return
+			if threatErr != nil {
+				a.findingRows = [][]string{{"错误", "行为关联", "采集失败", threatErr.Error(), "", "", "", "", ""}}
+				a.memoryRows = nil
+			} else {
+				a.findingRows = findingRows
+				a.memoryRows = memoryRows
 			}
-			a.findingRows = rows
-			a.setSummary(a.findingSummary, findingSummaryText(findings))
 			a.applyFindingFilter()
-			a.setStatus(fmt.Sprintf("关注项完成：%d 条。", len(rows)))
+			a.setStatus(fmt.Sprintf("关注项 1/2 完成：综合风险 %d，内存异常 %d；正在进行驱动多源核查...", len(findingRows), len(memoryRows)))
+		})
+
+		driverSnapshot, driverErr := driveranalysis.Collect(driveranalysis.Options{
+			HashLimitBytes: a.hashLimitBytes,
+			MaxRecords:     500,
+			MaxEvents:      400,
+		})
+		driverRows := driverFindingRows(driverSnapshot.Items)
+		a.mw.Synchronize(func() {
+			if driverErr != nil {
+				driverRows = [][]string{{"错误", "", "驱动多源核查失败", "", "", "", "", "", "", "", "", driverErr.Error(), "", "", ""}}
+			}
+			a.driverRows = driverRows
+			a.applyFindingFilter()
+			warnings := len(threatSnapshot.CollectionErrors) + len(driverSnapshot.CollectionErrors)
+			a.setSummary(a.findingSummary, riskSummaryText(threatSnapshot.Items, threatSnapshot.MemoryRecords, driverSnapshot.Items, warnings))
+			a.setStatus(fmt.Sprintf("关注项完成：综合风险 %d，内存异常 %d，驱动风险 %d，采集提示 %d。", len(findingRows), len(memoryRows), len(driverRows), warnings))
 		})
 	}()
 }
@@ -1585,7 +1631,7 @@ func (a *legacyApp) refreshFileTrace() {
 		return
 	}
 	a.fileTraceStarted = true
-	a.setStatus("正在扫描最近修改文件、最近运行文件和 Temp 可疑文件...")
+	a.setStatus("正在采集近期文件和传统取证痕迹，请等待...")
 	go func() {
 		snapshot, err := filetrace.Collect(opts)
 		rows := fileTraceRows(snapshot.Records)
@@ -1699,8 +1745,29 @@ func hostKindName(kind string) string {
 }
 
 func (a *legacyApp) applyFindingFilter() {
-	a.findingModel.SetRows(filterRows(a.findingRows, lineText(a.findingSearch)))
+	query := lineText(a.findingSearch)
+	a.findingModel.SetRows(filterRows(a.findingRows, query))
+	a.memoryModel.SetRows(filterRows(a.memoryRows, query))
+	a.driverModel.SetRows(filterRows(a.driverRows, query))
 	a.repaintTable(a.findingView)
+	a.repaintTable(a.memoryView)
+	a.repaintTable(a.driverView)
+}
+
+func (a *legacyApp) onFindingTabChanged() {
+	a.applyFindingFilter()
+	a.scheduleRepaintAfterNavigation()
+}
+
+func (a *legacyApp) exportCurrentFindingTable() {
+	switch currentIndex(a.findingTabs) {
+	case 1:
+		a.exportModel("memory-anomalies", a.memoryModel)
+	case 2:
+		a.exportModel("driver-risks", a.driverModel)
+	default:
+		a.exportModel("findings", a.findingModel)
+	}
 }
 
 func (a *legacyApp) applyEventFilter() {
@@ -1719,8 +1786,64 @@ func (a *legacyApp) applyHistoryFilter() {
 func (a *legacyApp) applyFileTraceFilter() {
 	rows := copyRows(a.fileTraceRows)
 	rows = appendRows(rows, a.fileTraceWarnings)
+	rows = fileTraceRowsForKind(rows, comboText(a.fileTraceKind))
 	a.fileTraceModel.SetRows(filterRows(rows, lineText(a.fileTraceSearch)))
 	a.repaintTable(a.fileTraceView)
+}
+
+func fileTraceKindOptions() []string {
+	return []string{
+		"全部取证源",
+		"近期文件/Temp",
+		"Prefetch",
+		"Amcache",
+		"Shimcache",
+		"UserAssist/PCA",
+		"LNK/JumpList",
+		"USN/$MFT",
+		"SRUM",
+		"PowerShell历史",
+		"取证源状态",
+	}
+}
+
+func fileTraceRowsForKind(rows [][]string, kind string) [][]string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" || kind == "全部取证源" {
+		return rows
+	}
+	out := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		category := valueAt(row, 0)
+		source := valueAt(row, 1)
+		match := false
+		switch kind {
+		case "近期文件/Temp":
+			match = category == "Temp 临时文件" || category == "最近修改文件"
+		case "Prefetch":
+			match = strings.Contains(source, "Prefetch")
+		case "Amcache":
+			match = strings.Contains(source, "Amcache")
+		case "Shimcache":
+			match = strings.Contains(source, "Shimcache")
+		case "UserAssist/PCA":
+			match = strings.Contains(source, "UserAssist") || strings.Contains(source, "PCA")
+		case "LNK/JumpList":
+			match = strings.Contains(source, "LNK") || strings.Contains(source, "JumpList")
+		case "USN/$MFT":
+			match = strings.Contains(source, "USN") || strings.Contains(source, "MFT")
+		case "SRUM":
+			match = strings.Contains(source, "SRUM")
+		case "PowerShell历史":
+			match = strings.Contains(source, "PowerShell")
+		case "取证源状态":
+			match = category == "取证源状态" || category == "采集提示"
+		}
+		if match {
+			out = append(out, append([]string(nil), row...))
+		}
+	}
+	return out
 }
 
 func (a *legacyApp) setEventCategory(category string) {
@@ -2142,6 +2265,7 @@ func moduleRows(items []process.ModuleInfo) [][]string {
 	for _, item := range items {
 		rows = append(rows, []string{
 			item.Name,
+			item.Kind,
 			item.MD5,
 			item.Signature,
 			item.BaseAddress,
@@ -2239,6 +2363,28 @@ func findingSummaryText(items []analysis.Finding) string {
 	return fmt.Sprintf("关注项 %d    高 %d    中 %d    低 %d", len(items), high, medium, low)
 }
 
+func riskSummaryText(threats []threatanalysis.Item, memory []memoryscan.Record, drivers []driveranalysis.Item, warnings int) string {
+	high, medium := 0, 0
+	for _, item := range threats {
+		switch item.Level {
+		case "高":
+			high++
+		case "中":
+			medium++
+		}
+	}
+	for _, item := range drivers {
+		switch item.Level {
+		case "高":
+			high++
+		case "中":
+			medium++
+		}
+	}
+	return fmt.Sprintf("综合风险 %d    内存异常 %d    驱动风险 %d    高 %d    中 %d    采集提示 %d",
+		len(threats), len(memory), len(drivers), high, medium, warnings)
+}
+
 func eventSummaryText(events []securitylog.Event, warnings []string) string {
 	logon := 0
 	failed := 0
@@ -2289,7 +2435,8 @@ func historySummaryText(records []history.Record, warnings []string) string {
 func fileTraceSummaryText(records []filetrace.Record, warnings []string) string {
 	temp := 0
 	modified := 0
-	recentRun := 0
+	artifacts := 0
+	statuses := 0
 	high := 0
 	medium := 0
 	for _, item := range records {
@@ -2298,8 +2445,10 @@ func fileTraceSummaryText(records []filetrace.Record, warnings []string) string 
 			temp++
 		case "最近修改文件":
 			modified++
-		case "最近运行文件":
-			recentRun++
+		case "执行痕迹", "快捷方式痕迹", "NTFS 变更痕迹", "NTFS 元数据", "网络与应用痕迹", "命令历史":
+			artifacts++
+		case "取证源状态":
+			statuses++
 		}
 		switch item.Suspicion {
 		case "高":
@@ -2308,8 +2457,8 @@ func fileTraceSummaryText(records []filetrace.Record, warnings []string) string 
 			medium++
 		}
 	}
-	return fmt.Sprintf("文件痕迹 %d    Temp %d    最近修改 %d    最近运行 %d    高可疑 %d    中可疑 %d    采集提示 %d",
-		len(records), temp, modified, recentRun, high, medium, len(warnings))
+	return fmt.Sprintf("记录 %d    传统痕迹 %d    Temp %d    最近修改 %d    取证源状态 %d    高可疑 %d    中可疑 %d    采集提示 %d",
+		len(records), artifacts, temp, modified, statuses, high, medium, len(warnings))
 }
 
 func aiSummaryText(resp aianalysis.AnalyzeResponse) string {
@@ -2541,6 +2690,70 @@ func findingRows(items []analysis.Finding) [][]string {
 	return rows
 }
 
+func threatRows(items []threatanalysis.Item) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, []string{
+			item.Level,
+			item.Scenario,
+			item.Summary,
+			item.Related,
+			item.MD5,
+			item.Signature,
+			item.Path,
+			fmt.Sprintf("PID %d / 连接 %d / 评分 %d", item.PID, item.Connections, item.Score),
+			item.Evidence,
+		})
+	}
+	return rows
+}
+
+func memoryFindingRows(items []memoryscan.Record) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, []string{
+			item.Level,
+			item.Category,
+			strconv.FormatUint(uint64(item.PID), 10),
+			item.Process,
+			item.Path,
+			item.Reason,
+			item.Base,
+			strconv.FormatUint(item.Size/1024, 10),
+			item.Protect,
+			item.MemoryType,
+			strconv.FormatUint(uint64(item.ThreadID), 10),
+			item.Context,
+			item.Details,
+		})
+	}
+	return rows
+}
+
+func driverFindingRows(items []driveranalysis.Item) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, []string{
+			item.Level,
+			strconv.Itoa(item.Score),
+			item.Name,
+			item.Kind,
+			item.Signature,
+			item.MD5,
+			item.Path,
+			item.ServiceName,
+			item.ServiceStart,
+			item.EventMatches,
+			item.SourceDiff,
+			item.Reason,
+			item.Evidence,
+			item.BaseAddress,
+			item.HashError,
+		})
+	}
+	return rows
+}
+
 func eventRows(items []securitylog.Event) [][]string {
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
@@ -2630,9 +2843,12 @@ func fileTraceRows(items []filetrace.Record) [][]string {
 			item.Name,
 			item.Suspicion,
 			item.Reason,
+			item.EvidenceTime,
+			item.TimeMeaning,
 			item.Modified,
 			item.LastRun,
 			item.RunCount,
+			item.SHA1,
 			formatKB(item.Size),
 			item.Extension,
 			item.Path,
@@ -2648,7 +2864,7 @@ func fileTraceWarningRows(generatedAt string, warnings []string) [][]string {
 		generatedAt = time.Now().Format("2006-01-02 15:04:05")
 	}
 	for _, warning := range warnings {
-		rows = append(rows, []string{"采集提示", "系统", warning, "", warning, generatedAt, "", "", "", "", "", warning})
+		rows = append(rows, []string{"采集提示", "系统", warning, "", warning, generatedAt, "采集提示产生时间", "", "", "", "", "", "", "", warning})
 	}
 	return rows
 }
@@ -2663,6 +2879,12 @@ func fileTraceDetails(item filetrace.Record) string {
 	}
 	if strings.TrimSpace(item.Accessed) != "" {
 		parts = append(parts, "访问: "+item.Accessed)
+	}
+	if strings.TrimSpace(item.Schema) != "" {
+		parts = append(parts, "Schema: "+item.Schema)
+	}
+	if strings.TrimSpace(item.Association) != "" {
+		parts = append(parts, "关联: "+item.Association)
 	}
 	if strings.TrimSpace(item.Details) != "" {
 		parts = append(parts, item.Details)
@@ -3183,7 +3405,7 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 		}
 	}
 	if len(moduleRows) > 0 {
-		if err := writeZipCSV(zw, "process-modules.csv", []string{"PID", "进程", "模块", "MD5", "签名", "基址", "大小KB", "路径", "错误"}, moduleRows); err != nil {
+		if err := writeZipCSV(zw, "process-modules.csv", []string{"PID", "进程", "模块", "类型", "MD5", "签名", "基址", "大小KB", "路径", "错误"}, moduleRows); err != nil {
 			return err
 		}
 	}
@@ -3340,6 +3562,7 @@ func packageModuleRows(items []process.Info, hashLimitBytes int64) ([][]string, 
 				strconv.FormatUint(uint64(procInfo.PID), 10),
 				procInfo.Name,
 				"",
+				"读取失败",
 				"",
 				"",
 				"",
@@ -3354,6 +3577,7 @@ func packageModuleRows(items []process.Info, hashLimitBytes int64) ([][]string, 
 				strconv.FormatUint(uint64(procInfo.PID), 10),
 				procInfo.Name,
 				module.Name,
+				module.Kind,
 				module.MD5,
 				module.Signature,
 				module.BaseAddress,

@@ -13,19 +13,24 @@ type Snapshot struct {
 }
 
 type Record struct {
-	Category  string `json:"category"`
-	Source    string `json:"source"`
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Directory string `json:"directory"`
-	Extension string `json:"extension"`
-	Size      int64  `json:"size"`
-	Created   string `json:"created"`
-	Modified  string `json:"modified"`
-	Accessed  string `json:"accessed"`
-	LastRun   string `json:"lastRun"`
-	RunCount  string `json:"runCount"`
-	Suspicion string `json:"suspicion"`
-	Reason    string `json:"reason"`
-	Details   string `json:"details"`
+	Category     string `json:"category"`
+	Source       string `json:"source"`
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	Directory    string `json:"directory"`
+	Extension    string `json:"extension"`
+	Size         int64  `json:"size"`
+	Created      string `json:"created"`
+	Modified     string `json:"modified"`
+	Accessed     string `json:"accessed"`
+	LastRun      string `json:"lastRun"`
+	RunCount     string `json:"runCount"`
+	Suspicion    string `json:"suspicion"`
+	Reason       string `json:"reason"`
+	Details      string `json:"details"`
+	EvidenceTime string `json:"evidenceTime,omitempty"`
+	TimeMeaning  string `json:"timeMeaning,omitempty"`
+	SHA1         string `json:"sha1,omitempty"`
+	Schema       string `json:"schema,omitempty"`
+	Association  string `json:"association,omitempty"`
 }

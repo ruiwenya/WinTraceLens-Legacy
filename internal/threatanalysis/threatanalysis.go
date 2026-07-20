@@ -22,10 +22,13 @@ type Options struct {
 }
 
 type Snapshot struct {
-	Items            []Item   `json:"items"`
-	CollectionErrors []string `json:"collectionErrors"`
-	GeneratedAt      string   `json:"generatedAt"`
-	SourceSummary    string   `json:"sourceSummary"`
+	Items            []Item              `json:"items"`
+	MemoryRecords    []memoryscan.Record `json:"memoryRecords"`
+	MemoryScanned    int                 `json:"memoryScanned"`
+	MemorySkipped    int                 `json:"memorySkipped"`
+	CollectionErrors []string            `json:"collectionErrors"`
+	GeneratedAt      string              `json:"generatedAt"`
+	SourceSummary    string              `json:"sourceSummary"`
 }
 
 type Item struct {
@@ -90,6 +93,9 @@ func Collect(opts Options) (Snapshot, error) {
 			IncludeThreads:       true,
 		})
 		snapshot.CollectionErrors = append(snapshot.CollectionErrors, memorySnapshot.CollectionErrors...)
+		snapshot.MemoryRecords = append(snapshot.MemoryRecords, memorySnapshot.Records...)
+		snapshot.MemoryScanned = memorySnapshot.ScannedProcesses
+		snapshot.MemorySkipped = memorySnapshot.SkippedProcesses
 	}
 
 	var traceSnapshot filetrace.Snapshot
@@ -168,6 +174,7 @@ func analyzeProcess(item process.Info, persistence map[string][]string, traces t
 
 	builder := evidenceBuilder{}
 	name := strings.ToLower(item.Name)
+	kernelPseudo := isKernelPseudoProcess(item)
 	pathKey := normalizePath(item.Path)
 	profile := expectedProcessProfile(item)
 	trusted := isTrustedSignature(item.Signature)
@@ -215,7 +222,12 @@ func analyzeProcess(item process.Info, persistence map[string][]string, traces t
 		points := 5
 		signal := "连接数异常"
 		evidence := fmt.Sprintf("当前实时连接数 %d", item.ConnectionCount)
-		if expectedNetwork && trusted {
+		if kernelPseudo {
+			points = 1
+			signal = "系统内核网络活动"
+			evidence += "，PID 0/4 的连接由内核协议栈承载，已降噪"
+			builder.hasExpected = true
+		} else if expectedNetwork && trusted {
 			points = 1
 			signal = "常见网络客户端连接数"
 			evidence += "，浏览器/聊天/开发工具已降噪"
@@ -227,7 +239,12 @@ func analyzeProcess(item process.Info, persistence map[string][]string, traces t
 		points := 3
 		signal := "连接数偏高"
 		evidence := fmt.Sprintf("当前实时连接数 %d", item.ConnectionCount)
-		if expectedNetwork && trusted {
+		if kernelPseudo {
+			points = 1
+			signal = "系统内核网络活动"
+			evidence += "，PID 0/4 的连接由内核协议栈承载，已降噪"
+			builder.hasExpected = true
+		} else if expectedNetwork && trusted {
 			points = 1
 			signal = "常见网络客户端连接数"
 			evidence += "，已降噪"
@@ -255,7 +272,7 @@ func analyzeProcess(item process.Info, persistence map[string][]string, traces t
 		}
 	}
 
-	if item.Path == "" {
+	if item.Path == "" && !kernelPseudo {
 		builder.add(2, "进程路径不可读", item.PathError)
 	} else if isWritablePath(item.Path) && item.Signature != signatureSystem {
 		points := 3
@@ -613,7 +630,7 @@ func expectedProcessProfile(item process.Info) string {
 	if hasAny(lowerName, lowerPath, []string{"huorong", "hips", "火绒", "360", "defender", "security", "avp", "edr", "xdr"}) {
 		return "安全软件 Hook/防护行为"
 	}
-	if hasAny(lowerName, lowerPath, []string{"code", "codex", "cursor", "node", "electron", "extension-host", "python", "go", "java"}) {
+	if hasAny(lowerName, lowerPath, []string{"code", "codex", "cursor", "node", "electron", "extension-host", "python", "go", "java", "utools"}) {
 		return "开发工具或运行时动态代码"
 	}
 	return ""
@@ -627,13 +644,14 @@ func isExpectedNetworkClient(name, path string) bool {
 		"wechat", "weixin", "wxwork", "qq", "tim",
 		"teams", "slack", "discord",
 		"code", "codex", "cursor", "node", "electron", "extension-host",
+		"utools",
 	})
 }
 
 func isExpectedUserWritableApp(name, path string) bool {
 	lowerName := strings.TrimSuffix(strings.ToLower(name), ".exe")
 	lowerPath := strings.ToLower(strings.ReplaceAll(path, "/", `\`))
-	if hasAny(lowerName, lowerPath, []string{"codex", "code", "cursor", "node", "electron", "extension-host"}) {
+	if hasAny(lowerName, lowerPath, []string{"codex", "code", "cursor", "node", "electron", "extension-host", "utools"}) {
 		return true
 	}
 	return strings.Contains(lowerPath, `\appdata\local\programs\`) || strings.Contains(lowerPath, `\.codex\`)
@@ -651,6 +669,11 @@ func isScannerPowerShell(item process.Info) bool {
 
 func isPowerShellName(name string) bool {
 	return name == "powershell" || name == "pwsh"
+}
+
+func isKernelPseudoProcess(item process.Info) bool {
+	name := strings.TrimSpace(strings.ToLower(item.Name))
+	return item.PID == 0 || item.PID == 4 || name == "system" || name == "[system process]"
 }
 
 func suspiciousSystemCommandLine(name, commandLine string) bool {

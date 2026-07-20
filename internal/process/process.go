@@ -30,6 +30,7 @@ type Options struct {
 
 type ModuleInfo struct {
 	Name         string `json:"name"`
+	Kind         string `json:"kind"`
 	Path         string `json:"path"`
 	BaseAddress  string `json:"baseAddress"`
 	SizeKB       uint32 `json:"sizeKb"`

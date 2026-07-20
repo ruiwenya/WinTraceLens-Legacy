@@ -1,0 +1,11 @@
+/dist/
+/verification-*.png
+*.test.exe
+*.log
+*.csv
+*.key
+*apikey*.txt
+.env
+.env.*
+*.pem
+*.pfx

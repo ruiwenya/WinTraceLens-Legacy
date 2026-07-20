@@ -122,6 +122,11 @@ func Collect(opts Options) ([]Info, error) {
 	items := make([]Info, 0, len(entries))
 	for _, entry := range entries {
 		path, pathErr := queryProcessPath(entry.ProcessID)
+		if entry.ProcessID == 4 && path == "" {
+			pathErr = "System 是内核进程，没有可按普通文件访问的可执行路径，进程 MD5 不适用；请在模块列表查看内核驱动。"
+		} else if entry.ProcessID == 0 && path == "" {
+			pathErr = "System Idle Process 没有可执行文件路径，MD5 不适用。"
+		}
 		createdAt := queryProcessCreatedAt(entry.ProcessID)
 		fileCreated, fileModified := fileTimes(path)
 		workingSetKB := queryProcessWorkingSetKB(entry.ProcessID)
@@ -272,6 +277,13 @@ func decodeUTF16LE(raw []byte) string {
 }
 
 func Modules(pid uint32, opts Options) ([]ModuleInfo, error) {
+	if pid == 4 {
+		return kernelModules(opts)
+	}
+	return processModules(pid, opts)
+}
+
+func processModules(pid uint32, opts Options) ([]ModuleInfo, error) {
 	handle, _, err := procCreateToolhelp32Snapshot.Call(th32csSnapModule|th32csSnapModule32, uintptr(pid))
 	if handle == uintptr(syscall.InvalidHandle) {
 		return nil, err
@@ -322,6 +334,7 @@ func Modules(pid uint32, opts Options) ([]ModuleInfo, error) {
 
 		modules = append(modules, ModuleInfo{
 			Name:         utf16String(entry.ModuleName[:]),
+			Kind:         "进程模块",
 			Path:         path,
 			BaseAddress:  fmt.Sprintf("0x%X", entry.ModBaseAddr),
 			SizeKB:       entry.ModBaseSize / 1024,

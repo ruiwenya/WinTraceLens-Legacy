@@ -547,7 +547,7 @@ func expectedMemoryContext(item process.Info) string {
 	if hasAny(lowerName, lowerPath, []string{"chrome", "msedge", "firefox", "browser", "wechat", "weixin", "wxwork", "qq", "tim", "teams", "slack", "discord"}) {
 		return "常见浏览器/聊天客户端动态内存行为"
 	}
-	if hasAny(lowerName, lowerPath, []string{"code", "codex", "cursor", "node", "electron", "extension-host", "python", "go", "java"}) {
+	if hasAny(lowerName, lowerPath, []string{"code", "codex", "cursor", "node", "electron", "extension-host", "python", "go", "java", "utools"}) {
 		return "常见开发工具或运行时动态内存行为"
 	}
 	if hasAny(lowerName, lowerPath, []string{"huorong", "hips", "hr", "火绒", "360", "defender", "security", "avp", "edr", "xdr"}) {
