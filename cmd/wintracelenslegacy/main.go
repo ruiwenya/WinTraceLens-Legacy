@@ -1015,18 +1015,23 @@ func (a *legacyApp) aiPage() Widget {
 		Layout:        HBox{MarginsZero: true, Spacing: 10},
 		Children: []Widget{
 			Composite{
-				MinSize:    Size{Width: 285},
+				MinSize:    Size{Width: 330},
 				Background: SolidColorBrush{Color: walk.RGB(255, 255, 255)},
-				Layout:     VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}, Spacing: 8},
+				Layout:     VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}, Spacing: 6},
 				Children: []Widget{
 					Label{Text: "证据范围", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
-					CheckBox{AssignTo: &a.aiSecProcesses, Text: "进程信息", Checked: true},
-					CheckBox{AssignTo: &a.aiSecFindings, Text: "关注项", Checked: true},
-					CheckBox{AssignTo: &a.aiSecHost, Text: "主机信息", Checked: true},
-					CheckBox{AssignTo: &a.aiSecFileTrace, Text: "文件痕迹", Checked: true},
-					CheckBox{AssignTo: &a.aiSecRegistry, Text: "注册表异常", Checked: true},
-					CheckBox{AssignTo: &a.aiSecHistory, Text: "历史通信", Checked: true},
-					CheckBox{AssignTo: &a.aiSecSecurity, Text: "事件日志", Checked: true},
+					Composite{Layout: HBox{MarginsZero: true, Spacing: 4}, Children: []Widget{
+						CheckBox{AssignTo: &a.aiSecProcesses, Text: "进程信息", Checked: true},
+						CheckBox{AssignTo: &a.aiSecFindings, Text: "关注项", Checked: true},
+						CheckBox{AssignTo: &a.aiSecHost, Text: "主机信息", Checked: true},
+						CheckBox{AssignTo: &a.aiSecFileTrace, Text: "文件痕迹", Checked: true},
+					}},
+					Composite{Layout: HBox{MarginsZero: true, Spacing: 4}, Children: []Widget{
+						CheckBox{AssignTo: &a.aiSecRegistry, Text: "注册表异常", Checked: true},
+						CheckBox{AssignTo: &a.aiSecHistory, Text: "历史通信", Checked: true},
+						CheckBox{AssignTo: &a.aiSecSecurity, Text: "事件日志", Checked: true},
+						HSpacer{},
+					}},
 					Label{Text: "分析问题", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
 					TextEdit{
 						AssignTo:      &a.aiQuestion,
@@ -1569,7 +1574,7 @@ func (a *legacyApp) showTableRowDetails(view *walk.TableView, model *tableModel,
 		a.setStatus("请先选择一行。")
 		return
 	}
-	walk.MsgBox(a.mw, title, text, walk.MsgBoxIconInformation)
+	a.showCopyableTextDialog(title, text)
 }
 
 func (a *legacyApp) saveTableRowDetails(view *walk.TableView, model *tableModel, name string) {
@@ -1578,12 +1583,65 @@ func (a *legacyApp) saveTableRowDetails(view *walk.TableView, model *tableModel,
 		a.setStatus("请先选择一行。")
 		return
 	}
+	a.saveDetailText(a.mw, name, text)
+}
+
+func (a *legacyApp) showCopyableTextDialog(title, text string) {
+	var dlg *walk.Dialog
+	var closeButton *walk.PushButton
+	var detailText *walk.TextEdit
+
+	_, err := (Dialog{
+		AssignTo:     &dlg,
+		Title:        title,
+		CancelButton: &closeButton,
+		Size:         Size{Width: 760, Height: 520},
+		MinSize:      Size{Width: 560, Height: 360},
+		Layout:       VBox{Margins: Margins{Left: 12, Top: 12, Right: 12, Bottom: 12}, Spacing: 8},
+		Children: []Widget{
+			Label{
+				Text:      "完整字段，可选择文本或复制全部。",
+				TextColor: walk.RGB(86, 101, 121),
+			},
+			TextEdit{
+				AssignTo:      &detailText,
+				Text:          text,
+				ReadOnly:      true,
+				VScroll:       true,
+				HScroll:       true,
+				CompactHeight: false,
+				StretchFactor: 1,
+			},
+			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				HSpacer{},
+				PushButton{Text: "复制全部", MinSize: Size{Width: 88}, OnClicked: func() {
+					if err := walk.Clipboard().SetText(text); err != nil {
+						a.showError("复制详情失败", err)
+						return
+					}
+					a.setStatus("详情已复制到剪贴板。")
+				}},
+				PushButton{Text: "保存文本", MinSize: Size{Width: 88}, OnClicked: func() {
+					a.saveDetailText(dlg, "detail", text)
+				}},
+				PushButton{AssignTo: &closeButton, Text: "关闭", MinSize: Size{Width: 78}, OnClicked: func() {
+					dlg.Cancel()
+				}},
+			}},
+		},
+	}).Run(a.mw)
+	if err != nil {
+		a.showError("打开详情失败", err)
+	}
+}
+
+func (a *legacyApp) saveDetailText(owner walk.Form, name, text string) {
 	dlg := walk.FileDialog{
 		Title:    "保存详情",
 		Filter:   "文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*",
 		FilePath: fmt.Sprintf("%s-%s.txt", name, time.Now().Format("20060102-150405")),
 	}
-	ok, err := dlg.ShowSave(a.mw)
+	ok, err := dlg.ShowSave(owner)
 	if err != nil {
 		a.showError("保存详情失败", err)
 		return
