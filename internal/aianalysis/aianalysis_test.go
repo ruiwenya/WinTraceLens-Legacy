@@ -24,11 +24,11 @@ func TestChatEndpointKeepsFullEndpoint(t *testing.T) {
 }
 
 func TestNormalizeSectionsDefaultsAndDedupes(t *testing.T) {
-	sections := normalizeSections([]string{"processes", "bad", "processes", "security"})
-	if len(sections) != 2 {
-		t.Fatalf("sections len = %d, want 2", len(sections))
+	sections := normalizeSections([]string{"processes", "bad", "processes", "registry", "security"})
+	if len(sections) != 3 {
+		t.Fatalf("sections len = %d, want 3", len(sections))
 	}
-	if sections[0] != sectionProcesses || sections[1] != sectionSecurity {
+	if sections[0] != sectionProcesses || sections[1] != sectionRegistry || sections[2] != sectionSecurity {
 		t.Fatalf("sections = %#v", sections)
 	}
 	if len(normalizeSections(nil)) == 0 {

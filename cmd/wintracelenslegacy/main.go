@@ -5,11 +5,15 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -30,11 +34,12 @@ import (
 	"github.com/ruiwenya/WinTraceLens/internal/host"
 	"github.com/ruiwenya/WinTraceLens/internal/memoryscan"
 	"github.com/ruiwenya/WinTraceLens/internal/process"
+	"github.com/ruiwenya/WinTraceLens/internal/registryanomaly"
 	"github.com/ruiwenya/WinTraceLens/internal/securitylog"
 	"github.com/ruiwenya/WinTraceLens/internal/threatanalysis"
 )
 
-var version = "1.0.0-legacy"
+var version = "1.1.0-legacy"
 
 var shellExecuteW = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
 
@@ -50,28 +55,28 @@ var processColumns = []tableColumn{
 	{"进程", 150},
 	{"CPU%", 70},
 	{"内存MB", 86},
-	{"线程", 66},
+	{"线程", -66},
 	{"句柄", 66},
 	{"连接数", 74},
-	{"MD5", 250},
+	{"MD5", -250},
 	{"签名", 120},
 	{"父PID", 74},
 	{"父进程", 140},
 	{"创建时间", 150},
 	{"路径", 420},
-	{"命令行", 460},
-	{"错误", 260},
+	{"命令行", -460},
+	{"错误", -260},
 }
 
 var processModuleColumns = []tableColumn{
 	{"模块", 180},
 	{"类型", 110},
-	{"MD5", 250},
+	{"MD5", -250},
 	{"签名", 120},
 	{"基址", 120},
 	{"大小KB", 80},
 	{"路径", 420},
-	{"错误", 240},
+	{"错误", -240},
 }
 
 var processConnectionColumns = []tableColumn{
@@ -157,11 +162,11 @@ var findingColumns = []tableColumn{
 	{"来源", 100},
 	{"名称", 220},
 	{"原因", 260},
-	{"MD5", 250},
+	{"MD5", -250},
 	{"签名", 120},
 	{"路径", 420},
-	{"命令", 420},
-	{"补充信息", 380},
+	{"命令", -420},
+	{"补充信息", -380},
 }
 
 var memoryColumns = []tableColumn{
@@ -171,13 +176,13 @@ var memoryColumns = []tableColumn{
 	{"进程", 150},
 	{"路径", 360},
 	{"原因", 280},
-	{"基址", 120},
+	{"基址", -120},
 	{"大小KB", 90},
-	{"保护属性", 120},
+	{"保护属性", -120},
 	{"内存类型", 100},
-	{"线程ID", 80},
+	{"线程ID", -80},
 	{"上下文", 240},
-	{"详情", 420},
+	{"详情", -420},
 }
 
 var driverColumns = []tableColumn{
@@ -186,16 +191,16 @@ var driverColumns = []tableColumn{
 	{"驱动", 190},
 	{"类型", 120},
 	{"签名", 130},
-	{"MD5", 250},
+	{"MD5", -250},
 	{"路径", 400},
 	{"服务", 180},
 	{"启动", 90},
-	{"加载事件", 320},
+	{"加载事件", -320},
 	{"多源差异", 280},
 	{"原因", 380},
-	{"证据", 420},
-	{"基址", 120},
-	{"错误", 260},
+	{"证据", -420},
+	{"基址", -120},
+	{"错误", -260},
 }
 
 var eventColumns = []tableColumn{
@@ -249,13 +254,34 @@ var hostColumns = []tableColumn{
 	{"类型", 90},
 	{"名称", 220},
 	{"状态/属性", 220},
-	{"账户/作者/SID", 320},
-	{"MD5", 250},
+	{"账户/作者/SID", -320},
+	{"MD5", -250},
 	{"签名", 120},
 	{"路径", 420},
 	{"命令/详情", 420},
-	{"位置/注册表", 380},
-	{"错误", 240},
+	{"位置/注册表", -380},
+	{"错误", -240},
+}
+
+var registryColumns = []tableColumn{
+	{"风险", 70},
+	{"评分", 66},
+	{"Hive", 70},
+	{"键路径", 420},
+	{"值名", 180},
+	{"类型", 120},
+	{"数据长度", 92},
+	{"最后写入", 150},
+	{"异常原因", 360},
+	{"关联证据", 300},
+	{"字符串预览", 360},
+	{"用户SID", -320},
+	{"SHA-256", -440},
+	{"哈希范围", -180},
+	{"熵", -80},
+	{"十六进制预览", -520},
+	{"数据截断", -90},
+	{"传统持久化位置", -120},
 }
 
 type tableColumn struct {
@@ -348,6 +374,7 @@ type legacyApp struct {
 	processModel   *tableModel
 	processView    *walk.TableView
 	processRows    [][]string
+	processItems   []process.Info
 	processSummary *walk.Label
 	processDetail  *walk.Label
 	moduleModel    *tableModel
@@ -391,6 +418,7 @@ type legacyApp struct {
 	hostIFEORows        [][]string
 	hostPersistenceRows [][]string
 	hostAllRows         [][]string
+	hostSnapshot        host.Snapshot
 
 	findingSearch  *walk.LineEdit
 	findingSummary *walk.Label
@@ -439,6 +467,15 @@ type legacyApp struct {
 	fileTraceRows     [][]string
 	fileTraceWarnings [][]string
 
+	registryStarted bool
+	registrySearch  *walk.LineEdit
+	registryRisk    *walk.ComboBox
+	registryMax     *walk.LineEdit
+	registrySummary *walk.Label
+	registryModel   *tableModel
+	registryView    *walk.TableView
+	registryRows    [][]string
+
 	aiProvider       *walk.ComboBox
 	aiModel          *walk.ComboBox
 	aiAPIKey         *walk.LineEdit
@@ -451,6 +488,7 @@ type legacyApp struct {
 	aiSecFindings    *walk.CheckBox
 	aiSecHost        *walk.CheckBox
 	aiSecFileTrace   *walk.CheckBox
+	aiSecRegistry    *walk.CheckBox
 	aiSecHistory     *walk.CheckBox
 	aiSecSecurity    *walk.CheckBox
 	aiChat           []aianalysis.Message
@@ -497,6 +535,7 @@ func newLegacyApp(hashLimitBytes int64) *legacyApp {
 		eventCategory:    "all",
 		historyModel:     newTableModel(historyColumns),
 		fileTraceModel:   newTableModel(fileTraceColumns),
+		registryModel:    newTableModel(registryColumns),
 	}
 }
 
@@ -663,6 +702,13 @@ func (a *legacyApp) contentArea() Widget {
 				a.fileTraceToolbar(),
 				a.assignedTableWithMinHeight(fileTraceColumns, a.fileTraceModel, &a.fileTraceView, nil, a.fileTraceContextMenu(), 180),
 			)},
+			{Title: "注册表异常", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+				"注册表异常",
+				"受限扫描传统持久化位置和已加载用户 Software 区域，只展示命中多信号异常评分的注册表值。",
+				a.summaryBar(&a.registrySummary, "等待扫描注册表高价值区域。"),
+				a.registryToolbar(),
+				a.assignedTableWithMinHeight(registryColumns, a.registryModel, &a.registryView, nil, a.registryContextMenu(), 180),
+			)},
 			{Title: "AI分析", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
 				"AI分析",
 				"选择在线模型后，把当前采集结果发送给 AI 辅助判断异常点和下一步排查方向。API Key 仅保存在本次运行内存中。",
@@ -707,8 +753,9 @@ func (a *legacyApp) processToolbar() Widget {
 		Children: []Widget{
 			Label{Text: "关键字", TextColor: walk.RGB(50, 67, 89)},
 			LineEdit{AssignTo: &a.processSearch, StretchFactor: 1, OnTextChanged: a.applyProcessFilter},
-			Label{Text: "进程名 / PID / MD5 / 路径 / 签名", TextColor: walk.RGB(112, 122, 138)},
+			Label{Text: "进程名 / PID / MD5 / 路径 / 签名，支持 /正则/i", TextColor: walk.RGB(112, 122, 138)},
 			PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshProcesses},
+			PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: func() { a.showTableRowDetails(a.processView, a.processModel, "进程完整信息") }},
 			PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: func() { a.exportModel("processes", a.processModel) }},
 		},
 	}
@@ -777,10 +824,11 @@ func (a *legacyApp) hostToolbar() Widget {
 				Label{Text: "关键字", TextColor: walk.RGB(50, 67, 89)},
 				LineEdit{AssignTo: &a.hostSearch, StretchFactor: 1, OnTextChanged: a.applyHostFilter},
 				PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshHost},
+				PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: func() { a.showTableRowDetails(a.hostView, a.hostModel, "主机信息详情") }},
 				PushButton{Text: "导出当前表", MinSize: Size{Width: 110}, OnClicked: a.exportCurrentHostTable},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
-				Label{Text: "打开系统界面", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "系统界面跳转", TextColor: walk.RGB(50, 67, 89)},
 				PushButton{Text: "服务管理器", MinSize: Size{Width: 92}, OnClicked: func() { a.openSystemTool("服务管理器", "services.msc") }},
 				PushButton{Text: "任务计划程序", MinSize: Size{Width: 104}, OnClicked: func() { a.openSystemTool("任务计划程序", "taskschd.msc") }},
 				PushButton{Text: "系统配置启动项", MinSize: Size{Width: 118}, OnClicked: func() { a.openSystemTool("系统配置启动项", "msconfig.exe") }},
@@ -794,7 +842,7 @@ func (a *legacyApp) hostToolbar() Widget {
 }
 
 func (a *legacyApp) hostTable() Widget {
-	return a.assignedTableWithMinHeight(hostColumns, a.hostModel, &a.hostView, nil, nil, 180)
+	return a.assignedTableWithMinHeight(hostColumns, a.hostModel, &a.hostView, nil, a.hostContextMenu(), 180)
 }
 
 func (a *legacyApp) findingToolbar() Widget {
@@ -806,6 +854,7 @@ func (a *legacyApp) findingToolbar() Widget {
 			LineEdit{AssignTo: &a.findingSearch, StretchFactor: 1, OnTextChanged: a.applyFindingFilter},
 			Label{Text: "级别 / 来源 / 原因 / MD5 / 路径", TextColor: walk.RGB(112, 122, 138)},
 			PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshFindings},
+			PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: a.showCurrentFindingDetails},
 			PushButton{Text: "导出当前表", MinSize: Size{Width: 104}, OnClicked: a.exportCurrentFindingTable},
 		},
 	}
@@ -819,13 +868,13 @@ func (a *legacyApp) findingPage() Widget {
 		OnCurrentIndexChanged: a.onFindingTabChanged,
 		Pages: []TabPage{
 			{Title: "综合风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-				a.assignedTableWithMinHeight(findingColumns, a.findingModel, &a.findingView, nil, nil, 180),
+				a.assignedTableWithMinHeight(findingColumns, a.findingModel, &a.findingView, nil, a.findingRowsContextMenu(), 180),
 			}},
 			{Title: "内存异常", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-				a.assignedTableWithMinHeight(memoryColumns, a.memoryModel, &a.memoryView, nil, nil, 180),
+				a.assignedTableWithMinHeight(memoryColumns, a.memoryModel, &a.memoryView, nil, a.memoryContextMenu(), 180),
 			}},
 			{Title: "驱动风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-				a.assignedTableWithMinHeight(driverColumns, a.driverModel, &a.driverView, nil, nil, 180),
+				a.assignedTableWithMinHeight(driverColumns, a.driverModel, &a.driverView, nil, a.driverContextMenu(), 180),
 			}},
 		},
 	}
@@ -911,6 +960,30 @@ func (a *legacyApp) fileTraceToolbar() Widget {
 	}
 }
 
+func (a *legacyApp) registryToolbar() Widget {
+	return Composite{
+		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
+		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
+		Children: []Widget{
+			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				Label{Text: "风险", TextColor: walk.RGB(50, 67, 89)},
+				ComboBox{AssignTo: &a.registryRisk, Model: []string{"全部风险", "高风险", "中风险", "低风险"}, CurrentIndex: 0, MinSize: Size{Width: 100}, MaxSize: Size{Width: 120}, OnCurrentIndexChanged: a.applyRegistryFilter},
+				Label{Text: "最多", TextColor: walk.RGB(50, 67, 89)},
+				LineEdit{AssignTo: &a.registryMax, Text: "500", MaxSize: Size{Width: 70}},
+				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
+				LineEdit{AssignTo: &a.registrySearch, StretchFactor: 1, OnTextChanged: a.applyRegistryFilter},
+				PushButton{Text: "重新扫描", MinSize: Size{Width: 88}, OnClicked: a.refreshRegistry},
+				PushButton{Text: "导出 CSV", MinSize: Size{Width: 92}, OnClicked: func() { a.exportModel("registry-anomalies", a.registryModel) }},
+			}},
+			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: a.showSelectedRegistryDetails},
+				PushButton{Text: "导出选中值", MinSize: Size{Width: 104}, OnClicked: a.exportSelectedRegistryValue},
+				Label{Text: "大体积 REG_BINARY 只是待核查信号；需结合高熵、PE/代码特征、异常位置或关联证据判断。", TextColor: walk.RGB(112, 122, 138), StretchFactor: 1},
+			}},
+		},
+	}
+}
+
 func (a *legacyApp) aiToolbar() Widget {
 	return Composite{
 		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
@@ -951,6 +1024,7 @@ func (a *legacyApp) aiPage() Widget {
 					CheckBox{AssignTo: &a.aiSecFindings, Text: "关注项", Checked: true},
 					CheckBox{AssignTo: &a.aiSecHost, Text: "主机信息", Checked: true},
 					CheckBox{AssignTo: &a.aiSecFileTrace, Text: "文件痕迹", Checked: true},
+					CheckBox{AssignTo: &a.aiSecRegistry, Text: "注册表异常", Checked: true},
 					CheckBox{AssignTo: &a.aiSecHistory, Text: "历史通信", Checked: true},
 					CheckBox{AssignTo: &a.aiSecSecurity, Text: "事件日志", Checked: true},
 					Label{Text: "分析问题", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
@@ -1059,6 +1133,8 @@ func (a *legacyApp) repaintCurrentTables() {
 		tables = []*walk.TableView{a.historyView}
 	case 5:
 		tables = []*walk.TableView{a.fileTraceView}
+	case 6:
+		tables = []*walk.TableView{a.registryView}
 	default:
 		tables = []*walk.TableView{
 			a.processView,
@@ -1071,6 +1147,7 @@ func (a *legacyApp) repaintCurrentTables() {
 			a.eventView,
 			a.historyView,
 			a.fileTraceView,
+			a.registryView,
 		}
 	}
 	for _, table := range tables {
@@ -1090,6 +1167,7 @@ func (a *legacyApp) repaintAllTables() {
 		a.eventView,
 		a.historyView,
 		a.fileTraceView,
+		a.registryView,
 	} {
 		a.repaintTable(table)
 	}
@@ -1142,6 +1220,10 @@ func (a *legacyApp) onMainTabChanged() {
 		if !a.fileTraceStarted {
 			a.refreshFileTrace()
 		}
+	case 6:
+		if !a.registryStarted {
+			a.refreshRegistry()
+		}
 	}
 	a.repaintAfterNavigation()
 	a.scheduleRepaintAfterNavigation()
@@ -1166,6 +1248,7 @@ func (a *legacyApp) refreshProcesses() {
 				a.setStatus("进程采集失败。")
 				return
 			}
+			a.processItems = append([]process.Info(nil), items...)
 			a.processRows = rows
 			a.setSummary(a.processSummary, processSummaryText(items))
 			a.applyProcessFilter()
@@ -1306,6 +1389,8 @@ func (a *legacyApp) exportSelectedConnections() {
 
 func (a *legacyApp) processContextMenu() []MenuItem {
 	return []MenuItem{
+		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.processView, a.processModel, "进程完整信息") }},
+		Separator{},
 		Action{Text: "复制 PID", OnTriggered: func() { a.copyTableColumn(a.processView, a.processModel, 0, "PID") }},
 		Action{Text: "复制进程名", OnTriggered: func() { a.copyTableColumn(a.processView, a.processModel, 1, "进程名") }},
 		Action{Text: "复制 MD5", OnTriggered: func() { a.copyTableColumn(a.processView, a.processModel, 7, "MD5") }},
@@ -1318,12 +1403,76 @@ func (a *legacyApp) processContextMenu() []MenuItem {
 func (a *legacyApp) moduleContextMenu() []MenuItem {
 	return []MenuItem{
 		Action{Text: "复制模块名", OnTriggered: func() { a.copyTableColumn(a.moduleView, a.moduleModel, 0, "模块名") }},
-		Action{Text: "复制 MD5", OnTriggered: func() { a.copyTableColumn(a.moduleView, a.moduleModel, 1, "MD5") }},
-		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.moduleView, a.moduleModel, 5, "路径") }},
-		Action{Text: "复制基址", OnTriggered: func() { a.copyTableColumn(a.moduleView, a.moduleModel, 3, "基址") }},
+		Action{Text: "复制 MD5", OnTriggered: func() { a.copyTableColumn(a.moduleView, a.moduleModel, 2, "MD5") }},
+		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.moduleView, a.moduleModel, 6, "路径") }},
+		Action{Text: "复制基址", OnTriggered: func() { a.copyTableColumn(a.moduleView, a.moduleModel, 4, "基址") }},
 		Separator{},
 		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.moduleView, a.moduleModel, "模块信息") }},
 	}
+}
+
+func (a *legacyApp) hostContextMenu() []MenuItem {
+	return []MenuItem{
+		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.hostView, a.hostModel, "主机信息详情") }},
+		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.hostView, a.hostModel, 6, "路径") }},
+		Action{Text: "复制命令", OnTriggered: func() { a.copyTableColumn(a.hostView, a.hostModel, 7, "命令") }},
+		Action{Text: "复制 MD5", OnTriggered: func() { a.copyTableColumn(a.hostView, a.hostModel, 4, "MD5") }},
+		Separator{},
+		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.hostView, a.hostModel, "主机信息") }},
+	}
+}
+
+func (a *legacyApp) findingRowsContextMenu() []MenuItem {
+	return []MenuItem{
+		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.findingView, a.findingModel, "综合风险详情") }},
+		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.findingView, a.findingModel, 6, "路径") }},
+		Separator{},
+		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.findingView, a.findingModel, "综合风险") }},
+	}
+}
+
+func (a *legacyApp) memoryContextMenu() []MenuItem {
+	return []MenuItem{
+		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.memoryView, a.memoryModel, "内存异常详情") }},
+		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.memoryView, a.memoryModel, 4, "路径") }},
+		Separator{},
+		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.memoryView, a.memoryModel, "内存异常") }},
+	}
+}
+
+func (a *legacyApp) driverContextMenu() []MenuItem {
+	return []MenuItem{
+		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.driverView, a.driverModel, "驱动风险详情") }},
+		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.driverView, a.driverModel, 6, "路径") }},
+		Separator{},
+		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.driverView, a.driverModel, "驱动风险") }},
+	}
+}
+
+func (a *legacyApp) registryContextMenu() []MenuItem {
+	return []MenuItem{
+		Action{Text: "查看详情", OnTriggered: a.showSelectedRegistryDetails},
+		Action{Text: "导出选中值", OnTriggered: a.exportSelectedRegistryValue},
+		Action{Text: "复制键路径", OnTriggered: func() { a.copyTableColumn(a.registryView, a.registryModel, 3, "键路径") }},
+		Action{Text: "复制 SHA-256", OnTriggered: func() { a.copyTableColumn(a.registryView, a.registryModel, 12, "SHA-256") }},
+		Separator{},
+		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.registryView, a.registryModel, "注册表异常") }},
+	}
+}
+
+func (a *legacyApp) showCurrentFindingDetails() {
+	switch currentIndex(a.findingTabs) {
+	case 1:
+		a.showTableRowDetails(a.memoryView, a.memoryModel, "内存异常详情")
+	case 2:
+		a.showTableRowDetails(a.driverView, a.driverModel, "驱动风险详情")
+	default:
+		a.showTableRowDetails(a.findingView, a.findingModel, "综合风险详情")
+	}
+}
+
+func (a *legacyApp) showSelectedRegistryDetails() {
+	a.showTableRowDetails(a.registryView, a.registryModel, "注册表异常详情")
 }
 
 func (a *legacyApp) connectionContextMenu() []MenuItem {
@@ -1502,6 +1651,7 @@ func (a *legacyApp) refreshHost() {
 				a.setStatus("主机信息采集失败。")
 				return
 			}
+			a.hostSnapshot = snapshot
 			a.serviceRows = serviceRows(snapshot.Services)
 			a.taskRows = taskRows(snapshot.ScheduledTasks)
 			a.startupRows = startupRows(snapshot.StartupItems)
@@ -1655,6 +1805,51 @@ func (a *legacyApp) refreshFileTrace() {
 	}()
 }
 
+func (a *legacyApp) refreshRegistry() {
+	maxRecords := 500
+	if raw := lineText(a.registryMax); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 3000 {
+			a.showError("注册表扫描参数错误", fmt.Errorf("最多条数必须是 1 到 3000 的整数"))
+			return
+		}
+		maxRecords = parsed
+	}
+	a.registryStarted = true
+	a.setStatus("正在扫描注册表高价值区域；旧系统上可能需要十余秒...")
+	processes := append([]process.Info(nil), a.processItems...)
+	machine := a.hostSnapshot
+	go func() {
+		snapshot, err := registryanomaly.Collect(registryanomaly.Options{
+			MaxRecords:  maxRecords,
+			MaxKeys:     6000,
+			MaxValues:   30000,
+			MaxDepth:    5,
+			MaxDataSize: 4 * 1024 * 1024,
+			Timeout:     12 * time.Second,
+		})
+		if err == nil {
+			snapshot = registryanomaly.Correlate(snapshot, processes, machine)
+		}
+		rows := registryRows(snapshot.Records)
+		a.mw.Synchronize(func() {
+			if err != nil {
+				a.showError("注册表异常扫描失败", err)
+				a.setStatus("注册表异常扫描失败。")
+				return
+			}
+			a.registryRows = rows
+			a.setSummary(a.registrySummary, registrySummaryText(snapshot))
+			a.applyRegistryFilter()
+			truncated := ""
+			if snapshot.Truncated {
+				truncated = "，已按时间或数量上限停止"
+			}
+			a.setStatus(fmt.Sprintf("注册表异常扫描完成：%d 条，扫描键 %d、值 %d，采集提示 %d 条%s。", len(rows), snapshot.ScannedKeys, snapshot.ScannedValues, len(snapshot.CollectionErrors), truncated))
+		})
+	}()
+}
+
 func (a *legacyApp) applyProcessFilter() {
 	rows := filterRows(a.processRows, lineText(a.processSearch))
 	a.processModel.SetRows(rows)
@@ -1789,6 +1984,23 @@ func (a *legacyApp) applyFileTraceFilter() {
 	rows = fileTraceRowsForKind(rows, comboText(a.fileTraceKind))
 	a.fileTraceModel.SetRows(filterRows(rows, lineText(a.fileTraceSearch)))
 	a.repaintTable(a.fileTraceView)
+}
+
+func (a *legacyApp) applyRegistryFilter() {
+	rows := copyRows(a.registryRows)
+	risk := strings.TrimSpace(comboText(a.registryRisk))
+	if risk != "" && risk != "全部风险" {
+		level := strings.TrimSuffix(risk, "风险")
+		filtered := make([][]string, 0, len(rows))
+		for _, row := range rows {
+			if valueAt(row, 0) == level {
+				filtered = append(filtered, append([]string(nil), row...))
+			}
+		}
+		rows = filtered
+	}
+	a.registryModel.SetRows(filterRows(rows, lineText(a.registrySearch)))
+	a.repaintTable(a.registryView)
 }
 
 func fileTraceKindOptions() []string {
@@ -2056,6 +2268,9 @@ func (a *legacyApp) aiSelectedSections() []string {
 	if checkBoxChecked(a.aiSecFileTrace) {
 		sections = append(sections, "filetrace")
 	}
+	if checkBoxChecked(a.aiSecRegistry) {
+		sections = append(sections, "registry")
+	}
 	if checkBoxChecked(a.aiSecHistory) {
 		sections = append(sections, "history")
 	}
@@ -2115,6 +2330,53 @@ func parseDate(value string, endOfDay bool) (time.Time, error) {
 
 func (a *legacyApp) exportCurrentHostTable() {
 	a.exportModel("host-"+a.hostKind, a.hostModel)
+}
+
+func (a *legacyApp) exportSelectedRegistryValue() {
+	row := currentTableRow(a.registryView, a.registryModel)
+	if len(row) == 0 {
+		a.setStatus("请先选择一条注册表异常记录。")
+		return
+	}
+	valueName := strings.TrimSpace(valueAt(row, 4))
+	if valueName == "(默认)" {
+		valueName = ""
+	}
+	ref := registryanomaly.ExportReference{
+		Hive:      strings.TrimSpace(valueAt(row, 2)),
+		KeyPath:   strings.TrimSpace(valueAt(row, 3)),
+		ValueName: valueName,
+	}
+	if ref.Hive == "" || ref.KeyPath == "" {
+		a.setStatus("选中记录缺少 Hive 或键路径，无法导出。")
+		return
+	}
+	dlg := walk.FileDialog{
+		Title:    "导出注册表值证据",
+		Filter:   "ZIP 文件 (*.zip)|*.zip|所有文件 (*.*)|*.*",
+		FilePath: fmt.Sprintf("registry-evidence-%s.zip", time.Now().Format("20060102-150405")),
+	}
+	ok, err := dlg.ShowSave(a.mw)
+	if err != nil {
+		a.showError("导出注册表值失败", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	path := ensureZIPExt(dlg.FilePath)
+	a.setStatus("正在只读导出选中的注册表值...")
+	go func() {
+		err := writeRegistryEvidenceArchive(path, ref)
+		a.mw.Synchronize(func() {
+			if err != nil {
+				a.showError("导出注册表值失败", err)
+				a.setStatus("注册表值导出失败。")
+				return
+			}
+			a.setStatus("注册表值证据已导出：" + path)
+		})
+	}()
 }
 
 func (a *legacyApp) exportEvidencePackage() {
@@ -2200,7 +2462,12 @@ func (a *legacyApp) showError(title string, err error) {
 func toTableViewColumns(columns []tableColumn) []TableViewColumn {
 	out := make([]TableViewColumn, len(columns))
 	for i, col := range columns {
-		out[i] = TableViewColumn{Title: col.Title, Width: col.Width}
+		width := col.Width
+		hidden := width < 0
+		if hidden {
+			width = -width
+		}
+		out[i] = TableViewColumn{Title: col.Title, Width: width, Hidden: hidden}
 	}
 	return out
 }
@@ -2730,6 +2997,53 @@ func memoryFindingRows(items []memoryscan.Record) [][]string {
 	return rows
 }
 
+func registryRows(items []registryanomaly.Record) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, []string{
+			item.Level,
+			strconv.Itoa(item.Score),
+			item.Hive,
+			item.KeyPath,
+			item.ValueName,
+			item.ValueType,
+			strconv.Itoa(item.DataLength),
+			item.LastWrite,
+			strings.Join(item.Reasons, "；"),
+			strings.Join(item.Associations, "；"),
+			item.StringsPreview,
+			item.SID,
+			item.SHA256,
+			item.HashScope,
+			fmt.Sprintf("%.2f", item.Entropy),
+			item.HexPreview,
+			formatBool(item.DataTruncated),
+			formatBool(item.TraditionalPath),
+		})
+	}
+	return rows
+}
+
+func registrySummaryText(snapshot registryanomaly.Snapshot) string {
+	high, medium, low := 0, 0, 0
+	for _, item := range snapshot.Records {
+		switch item.Level {
+		case "高":
+			high++
+		case "中":
+			medium++
+		default:
+			low++
+		}
+	}
+	limit := ""
+	if snapshot.Truncated {
+		limit = "    已到扫描上限"
+	}
+	return fmt.Sprintf("异常 %d    高 %d    中 %d    低 %d    扫描键 %d    扫描值 %d    采集提示 %d%s",
+		len(snapshot.Records), high, medium, low, snapshot.ScannedKeys, snapshot.ScannedValues, len(snapshot.CollectionErrors), limit)
+}
+
 func driverFindingRows(items []driveranalysis.Item) [][]string {
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
@@ -2910,20 +3224,42 @@ func formatBool(value bool) string {
 }
 
 func filterRows(rows [][]string, q string) [][]string {
-	q = strings.ToLower(strings.TrimSpace(q))
+	q = strings.TrimSpace(q)
 	if q == "" {
 		return copyRows(rows)
 	}
+	match := rowFilterMatcher(q)
 	filtered := make([][]string, 0, len(rows))
 	for _, row := range rows {
 		for _, value := range row {
-			if strings.Contains(strings.ToLower(value), q) {
+			if match(value) {
 				filtered = append(filtered, append([]string(nil), row...))
 				break
 			}
 		}
 	}
 	return filtered
+}
+
+func rowFilterMatcher(query string) func(string) bool {
+	query = strings.TrimSpace(query)
+	if strings.HasPrefix(query, "/") {
+		if end := strings.LastIndex(query[1:], "/"); end >= 0 {
+			end++
+			pattern := query[1:end]
+			flags := strings.ToLower(strings.TrimSpace(query[end+1:]))
+			if strings.Contains(flags, "i") {
+				pattern = "(?i:" + pattern + ")"
+			}
+			if compiled, err := regexp.Compile(pattern); err == nil {
+				return compiled.MatchString
+			}
+		}
+	}
+	lower := strings.ToLower(query)
+	return func(value string) bool {
+		return strings.Contains(strings.ToLower(value), lower)
+	}
 }
 
 func copyRows(rows [][]string) [][]string {
@@ -3273,7 +3609,7 @@ func warningRows(items []string) [][]string {
 	return rows
 }
 
-func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot host.Snapshot, findings []analysis.Finding, securitySnapshot securitylog.Snapshot, historySnapshot history.Snapshot, fileTraceSnapshot filetrace.Snapshot, procErr, hostErr, eventErr, historyErr, fileTraceErr, connectionErr, moduleErr error) string {
+func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot host.Snapshot, findings []analysis.Finding, registrySnapshot registryanomaly.Snapshot, securitySnapshot securitylog.Snapshot, historySnapshot history.Snapshot, fileTraceSnapshot filetrace.Snapshot, procErr, hostErr, registryErr, eventErr, historyErr, fileTraceErr, connectionErr, moduleErr error) string {
 	lines := []string{
 		"WinTraceLens Legacy 取证包",
 		"生成时间: " + generatedAt,
@@ -3282,6 +3618,7 @@ func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot 
 		processSummaryText(processes),
 		hostSummaryText(hostSnapshot),
 		findingSummaryText(findings),
+		registrySummaryText(registrySnapshot),
 		eventSummaryText(securitySnapshot.Events, securitySnapshot.CollectionErrors),
 		historySummaryText(historySnapshot.Records, historySnapshot.CollectionErrors),
 		fileTraceSummaryText(fileTraceSnapshot.Records, fileTraceSnapshot.CollectionErrors),
@@ -3294,6 +3631,7 @@ func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot 
 		"- file-traces.csv",
 		"- host-all.csv / host-services.csv / host-tasks.csv / host-startup.csv / host-users.csv / host-ifeo.csv / host-persistence.csv",
 		"- findings.csv",
+		"- registry-anomalies.csv",
 		"- security-events.csv",
 		"- collection-warnings.csv（仅在存在采集提示时生成）",
 	}
@@ -3303,6 +3641,9 @@ func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot 
 	}
 	if hostErr != nil {
 		errs = append(errs, "主机信息采集失败: "+hostErr.Error())
+	}
+	if registryErr != nil {
+		errs = append(errs, "注册表异常采集失败: "+registryErr.Error())
 	}
 	if eventErr != nil {
 		errs = append(errs, "事件日志采集失败: "+eventErr.Error())
@@ -3323,6 +3664,7 @@ func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot 
 	errs = append(errs, securitySnapshot.CollectionErrors...)
 	errs = append(errs, historySnapshot.CollectionErrors...)
 	errs = append(errs, fileTraceSnapshot.CollectionErrors...)
+	errs = append(errs, registrySnapshot.CollectionErrors...)
 	if len(errs) > 0 {
 		lines = append(lines, "", "采集提示:")
 		for _, err := range errs {
@@ -3356,6 +3698,63 @@ func writeCSVFile(path string, headers []string, rows [][]string) error {
 	return writer.Error()
 }
 
+func writeRegistryEvidenceArchive(path string, ref registryanomaly.ExportReference) error {
+	data, valueType, modified, err := registryanomaly.ReadExportValue(ref, 32*1024*1024)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(data)
+	metadata := struct {
+		Hive        string `json:"hive"`
+		KeyPath     string `json:"keyPath"`
+		ValueName   string `json:"valueName"`
+		ValueType   uint32 `json:"valueType"`
+		Length      int    `json:"length"`
+		SHA256      string `json:"sha256"`
+		LastWrite   string `json:"lastWrite"`
+		CollectedAt string `json:"collectedAt"`
+	}{
+		Hive:        ref.Hive,
+		KeyPath:     ref.KeyPath,
+		ValueName:   ref.ValueName,
+		ValueType:   valueType,
+		Length:      len(data),
+		SHA256:      hex.EncodeToString(sum[:]),
+		LastWrite:   modified.Local().Format("2006-01-02 15:04:05"),
+		CollectedAt: time.Now().Format("2006-01-02 15:04:05"),
+	}
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	writer := zip.NewWriter(file)
+	binFile, err := writer.Create("registry-value.bin")
+	if err == nil {
+		_, err = binFile.Write(data)
+	}
+	if err == nil {
+		jsonFile, createErr := writer.Create("registry-value.json")
+		if createErr != nil {
+			err = createErr
+		} else {
+			_, err = jsonFile.Write(metadataJSON)
+		}
+	}
+	closeErr := writer.Close()
+	fileErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return fileErr
+}
+
 func packageFileTraceOptions(eventOpts securitylog.Options) filetrace.Options {
 	hours := 24 * 7
 	if !eventOpts.StartTime.IsZero() {
@@ -3384,6 +3783,10 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 	generatedAt := time.Now().Format("2006-01-02 15:04:05")
 	processes, procErr := process.Collect(process.Options{HashLimitBytes: hashLimitBytes})
 	hostSnapshot, hostErr := host.Collect(host.Options{HashLimitBytes: hashLimitBytes})
+	registrySnapshot, registryErr := registryanomaly.Collect(registryanomaly.Options{MaxRecords: 500, MaxKeys: 6000, MaxValues: 30000, MaxDepth: 5, MaxDataSize: 4 * 1024 * 1024, Timeout: 12 * time.Second})
+	if registryErr == nil {
+		registrySnapshot = registryanomaly.Correlate(registrySnapshot, processes, hostSnapshot)
+	}
 	securitySnapshot, eventErr := securitylog.Collect(eventOpts)
 	historySnapshot, historyErr := history.Collect(history.Options{StartTime: eventOpts.StartTime, EndTime: eventOpts.EndTime, MaxRecords: eventOpts.MaxRecords})
 	fileTraceSnapshot, fileTraceErr := filetrace.Collect(packageFileTraceOptions(eventOpts))
@@ -3391,7 +3794,7 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 	moduleRows, moduleErr := packageModuleRows(processes, hashLimitBytes)
 	findings := analysis.BuildFindings(processes, hostSnapshot)
 
-	if err := writeZipText(zw, "summary.txt", evidenceSummary(generatedAt, processes, hostSnapshot, findings, securitySnapshot, historySnapshot, fileTraceSnapshot, procErr, hostErr, eventErr, historyErr, fileTraceErr, connectionErr, moduleErr)); err != nil {
+	if err := writeZipText(zw, "summary.txt", evidenceSummary(generatedAt, processes, hostSnapshot, findings, registrySnapshot, securitySnapshot, historySnapshot, fileTraceSnapshot, procErr, hostErr, registryErr, eventErr, historyErr, fileTraceErr, connectionErr, moduleErr)); err != nil {
 		return err
 	}
 	if procErr == nil {
@@ -3447,6 +3850,11 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 	if err := writeZipCSV(zw, "findings.csv", headersOf(findingColumns), findingRows(findings)); err != nil {
 		return err
 	}
+	if registryErr == nil {
+		if err := writeZipCSV(zw, "registry-anomalies.csv", headersOf(registryColumns), registryRows(registrySnapshot.Records)); err != nil {
+			return err
+		}
+	}
 	if eventErr == nil {
 		rows := eventRows(securitySnapshot.Events)
 		rows = append(rows, eventWarningRows(securitySnapshot.GeneratedAt, securitySnapshot.CollectionErrors)...)
@@ -3475,6 +3883,9 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 	if hostErr != nil {
 		errs = append(errs, "主机信息采集失败: "+hostErr.Error())
 	}
+	if registryErr != nil {
+		errs = append(errs, "注册表异常采集失败: "+registryErr.Error())
+	}
 	if eventErr != nil {
 		errs = append(errs, "事件日志采集失败: "+eventErr.Error())
 	}
@@ -3494,6 +3905,7 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 	errs = append(errs, securitySnapshot.CollectionErrors...)
 	errs = append(errs, historySnapshot.CollectionErrors...)
 	errs = append(errs, fileTraceSnapshot.CollectionErrors...)
+	errs = append(errs, registrySnapshot.CollectionErrors...)
 	if len(errs) > 0 {
 		if err := writeZipCSV(zw, "collection-warnings.csv", []string{"提示"}, warningRows(errs)); err != nil {
 			return err

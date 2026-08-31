@@ -18,6 +18,7 @@ import (
 	"github.com/ruiwenya/WinTraceLens/internal/loghealth"
 	"github.com/ruiwenya/WinTraceLens/internal/memoryscan"
 	"github.com/ruiwenya/WinTraceLens/internal/process"
+	"github.com/ruiwenya/WinTraceLens/internal/registryanomaly"
 	"github.com/ruiwenya/WinTraceLens/internal/securitylog"
 	"github.com/ruiwenya/WinTraceLens/internal/threatanalysis"
 )
@@ -29,6 +30,7 @@ const (
 	sectionMemory    = "memory"
 	sectionHost      = "host"
 	sectionFileTrace = "filetrace"
+	sectionRegistry  = "registry"
 	sectionHistory   = "history"
 	sectionSecurity  = "security"
 	sectionLogHealth = "loghealth"
@@ -328,6 +330,7 @@ func normalizeSections(values []string) []string {
 		sectionMemory:    {},
 		sectionHost:      {},
 		sectionFileTrace: {},
+		sectionRegistry:  {},
 		sectionHistory:   {},
 		sectionSecurity:  {},
 		sectionLogHealth: {},
@@ -487,6 +490,8 @@ func collectSection(section string, maxItems int, opts Options) evidenceSection 
 		return collectHost(maxItems, opts)
 	case sectionFileTrace:
 		return collectFileTrace(maxItems)
+	case sectionRegistry:
+		return collectRegistry(maxItems, opts)
 	case sectionHistory:
 		return collectHistory(maxItems)
 	case sectionSecurity:
@@ -633,6 +638,40 @@ func collectFileTrace(maxItems int) evidenceSection {
 		Count:            len(snapshot.Records),
 		Note:             "最近 7 天，优先保留可疑文件",
 		CollectionErrors: snapshot.CollectionErrors,
+		Items:            limitSlice(snapshot.Records, maxItems),
+	}
+}
+
+func collectRegistry(maxItems int, opts Options) evidenceSection {
+	snapshot, err := registryanomaly.Collect(registryanomaly.Options{
+		MaxRecords:  maxItems,
+		MaxKeys:     6000,
+		MaxValues:   30000,
+		MaxDepth:    5,
+		MaxDataSize: 4 * 1024 * 1024,
+		Timeout:     10 * time.Second,
+	})
+	if err != nil {
+		return sectionError(sectionRegistry, "注册表异常", err)
+	}
+	collectionErrors := append([]string(nil), snapshot.CollectionErrors...)
+	processes, processErr := process.Collect(process.Options{HashLimitBytes: opts.HashLimitBytes, SkipHashes: true, SkipSignatures: true})
+	machine, hostErr := host.Collect(host.Options{HashLimitBytes: opts.HashLimitBytes})
+	if processErr != nil {
+		collectionErrors = append(collectionErrors, "注册表关联进程采集失败: "+processErr.Error())
+	}
+	if hostErr != nil {
+		collectionErrors = append(collectionErrors, "注册表关联主机信息采集失败: "+hostErr.Error())
+	}
+	if processErr == nil || hostErr == nil {
+		snapshot = registryanomaly.Correlate(snapshot, processes, machine)
+	}
+	return evidenceSection{
+		Key:              sectionRegistry,
+		Label:            "注册表异常",
+		Count:            len(snapshot.Records),
+		Note:             "仅包含受控高价值位置中命中多信号评分的记录；二进制值只发送哈希、长度和有限预览，不发送完整原始数据",
+		CollectionErrors: collectionErrors,
 		Items:            limitSlice(snapshot.Records, maxItems),
 	}
 }
