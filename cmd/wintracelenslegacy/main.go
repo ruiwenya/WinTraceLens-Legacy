@@ -296,6 +296,13 @@ type tableModel struct {
 	rows    [][]string
 }
 
+type progressTask struct {
+	label       string
+	value       int
+	determinate bool
+	generation  uint64
+}
+
 func newTableModel(columns []tableColumn) *tableModel {
 	return &tableModel{columns: columns}
 }
@@ -364,6 +371,10 @@ type legacyApp struct {
 	mw             *walk.MainWindow
 	mainTabs       *walk.TabWidget
 	status         *walk.Label
+	progressText   *walk.Label
+	progressBar    *walk.ProgressBar
+	progressTasks  map[string]progressTask
+	progressSeq    uint64
 	hashLimitBytes int64
 	processStarted bool
 	hostStarted    bool
@@ -517,6 +528,7 @@ func main() {
 func newLegacyApp(hashLimitBytes int64) *legacyApp {
 	return &legacyApp{
 		hashLimitBytes:   hashLimitBytes,
+		progressTasks:    make(map[string]progressTask),
 		processModel:     newTableModel(processColumns),
 		moduleModel:      newTableModel(processModuleColumns),
 		connModel:        newTableModel(processConnectionColumns),
@@ -555,9 +567,11 @@ func (a *legacyApp) run() error {
 			a.contentArea(),
 			Composite{
 				Background: SolidColorBrush{Color: walk.RGB(235, 241, 248)},
-				Layout:     HBox{Margins: Margins{Left: 10, Top: 6, Right: 10, Bottom: 6}},
+				Layout:     HBox{Margins: Margins{Left: 10, Top: 6, Right: 10, Bottom: 6}, Spacing: 8},
 				Children: []Widget{
 					Label{AssignTo: &a.status, Text: "就绪。建议以管理员权限运行，以获得完整事件日志和系统信息。", TextColor: walk.RGB(50, 67, 89), StretchFactor: 1},
+					Label{AssignTo: &a.progressText, Text: "采集进度：就绪", TextColor: walk.RGB(50, 67, 89), MinSize: Size{Width: 126}},
+					ProgressBar{AssignTo: &a.progressBar, MinValue: 0, MaxValue: 100, Value: 0, MinSize: Size{Width: 150}, MaxSize: Size{Width: 210}},
 				},
 			},
 		},
@@ -1243,12 +1257,14 @@ func (a *legacyApp) onHostTabChanged() {
 
 func (a *legacyApp) refreshProcesses() {
 	a.processStarted = true
+	progressToken := a.beginProgress("processes", "进程信息", false, 0)
 	a.setStatus("正在采集进程、MD5、签名和连接数...")
 	go func() {
 		items, err := process.Collect(process.Options{HashLimitBytes: a.hashLimitBytes})
 		rows := processRows(items)
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("processes", progressToken, "进程信息")
 				a.showError("进程采集失败", err)
 				a.setStatus("进程采集失败。")
 				return
@@ -1258,6 +1274,7 @@ func (a *legacyApp) refreshProcesses() {
 			a.setSummary(a.processSummary, processSummaryText(items))
 			a.applyProcessFilter()
 			a.clearProcessDetails("请选择一个进程查看模块列表和网络连接。")
+			a.completeProgress("processes", progressToken, "进程信息")
 			a.setStatus(fmt.Sprintf("进程信息完成：%d 条。", len(rows)))
 		})
 	}()
@@ -1327,8 +1344,14 @@ func (a *legacyApp) loadProcessDetails(pid uint32, name string, force bool) {
 	if a.processDetail != nil {
 		_ = a.processDetail.SetText(fmt.Sprintf("正在读取 %s (PID %d) 的模块和网络连接...", name, pid))
 	}
+	progressToken := a.beginProgress("process-detail", "进程详情", true, 10)
 	go func() {
 		modules, moduleErr := process.Modules(pid, process.Options{HashLimitBytes: a.hashLimitBytes})
+		a.mw.Synchronize(func() {
+			if seq == a.detailSeq {
+				a.updateProgress("process-detail", progressToken, 55, "进程详情：网络连接")
+			}
+		})
 		connections, connectionErr := process.Connections(pid)
 		moduleRows := moduleRows(modules)
 		connRows := connectionRows(connections)
@@ -1351,12 +1374,14 @@ func (a *legacyApp) loadProcessDetails(pid uint32, name string, force bool) {
 			if a.processDetail != nil {
 				_ = a.processDetail.SetText(processDetailSummary(pid, name, modules, connections, moduleErr, connectionErr))
 			}
+			a.completeProgress("process-detail", progressToken, "进程详情")
 			a.setStatus(fmt.Sprintf("进程详情完成：%s (PID %d)，模块 %d，连接 %d。", name, pid, len(modules), len(connections)))
 		})
 	}()
 }
 
 func (a *legacyApp) clearProcessDetails(text string) {
+	a.cancelProgress("process-detail")
 	a.hasSelection = false
 	a.selectedPID = 0
 	a.selectedName = ""
@@ -1700,11 +1725,13 @@ func (a *legacyApp) copyHistoryTarget() {
 
 func (a *legacyApp) refreshHost() {
 	a.hostStarted = true
+	progressToken := a.beginProgress("host", "主机信息", false, 0)
 	a.setStatus("正在采集服务、计划任务、启动项、用户和镜像劫持...")
 	go func() {
 		snapshot, err := host.Collect(host.Options{HashLimitBytes: a.hashLimitBytes})
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("host", progressToken, "主机信息")
 				a.showError("主机信息采集失败", err)
 				a.setStatus("主机信息采集失败。")
 				return
@@ -1723,6 +1750,7 @@ func (a *legacyApp) refreshHost() {
 			if len(snapshot.CollectionErrors) > 0 {
 				warn = fmt.Sprintf("，采集警告 %d 条", len(snapshot.CollectionErrors))
 			}
+			a.completeProgress("host", progressToken, "主机信息")
 			a.setStatus(fmt.Sprintf("主机信息完成：服务 %d，计划任务 %d，启动项 %d，用户 %d，镜像劫持 %d，持久化 %d%s。", len(a.serviceRows), len(a.taskRows), len(a.startupRows), len(a.userRows), len(a.ifeoRows), len(a.persistenceRows), warn))
 		})
 	}()
@@ -1730,6 +1758,7 @@ func (a *legacyApp) refreshHost() {
 
 func (a *legacyApp) refreshFindings() {
 	a.findingStarted = true
+	progressToken := a.beginProgress("findings", "关注项：行为与内存", true, 10)
 	a.setStatus("关注项 1/2：正在分析进程、持久化和内存异常...")
 	go func() {
 		threatSnapshot, threatErr := threatanalysis.Collect(threatanalysis.Options{
@@ -1748,6 +1777,7 @@ func (a *legacyApp) refreshFindings() {
 				a.memoryRows = memoryRows
 			}
 			a.applyFindingFilter()
+			a.updateProgress("findings", progressToken, 55, "关注项：驱动核查")
 			a.setStatus(fmt.Sprintf("关注项 1/2 完成：综合风险 %d，内存异常 %d；正在进行驱动多源核查...", len(findingRows), len(memoryRows)))
 		})
 
@@ -1765,6 +1795,7 @@ func (a *legacyApp) refreshFindings() {
 			a.applyFindingFilter()
 			warnings := len(threatSnapshot.CollectionErrors) + len(driverSnapshot.CollectionErrors)
 			a.setSummary(a.findingSummary, riskSummaryText(threatSnapshot.Items, threatSnapshot.MemoryRecords, driverSnapshot.Items, warnings))
+			a.completeProgress("findings", progressToken, "关注项")
 			a.setStatus(fmt.Sprintf("关注项完成：综合风险 %d，内存异常 %d，驱动风险 %d，采集提示 %d。", len(findingRows), len(memoryRows), len(driverRows), warnings))
 		})
 	}()
@@ -1777,6 +1808,7 @@ func (a *legacyApp) refreshEvents() {
 		return
 	}
 	a.eventStarted = true
+	progressToken := a.beginProgress("events", "事件日志", false, 0)
 	a.setStatus("正在读取事件日志...")
 	go func() {
 		snapshot, err := securitylog.Collect(opts)
@@ -1784,6 +1816,7 @@ func (a *legacyApp) refreshEvents() {
 		warnings := eventWarningRows(snapshot.GeneratedAt, snapshot.CollectionErrors)
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("events", progressToken, "事件日志")
 				a.showError("事件日志读取失败", err)
 				a.setStatus("事件日志读取失败。")
 				return
@@ -1796,6 +1829,7 @@ func (a *legacyApp) refreshEvents() {
 			if len(snapshot.CollectionErrors) > 0 {
 				warn = fmt.Sprintf("，采集警告 %d 条", len(snapshot.CollectionErrors))
 			}
+			a.completeProgress("events", progressToken, "事件日志")
 			a.setStatus(fmt.Sprintf("事件日志完成：%d 条%s。", len(rows), warn))
 		})
 	}()
@@ -1808,6 +1842,7 @@ func (a *legacyApp) refreshHistory() {
 		return
 	}
 	a.historyStarted = true
+	progressToken := a.beginProgress("history", "历史通信", false, 0)
 	a.setStatus("正在读取历史通信记录...")
 	go func() {
 		snapshot, err := history.Collect(opts)
@@ -1815,6 +1850,7 @@ func (a *legacyApp) refreshHistory() {
 		warnings := historyWarningRows(snapshot.GeneratedAt, snapshot.CollectionErrors)
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("history", progressToken, "历史通信")
 				a.showError("历史通信读取失败", err)
 				a.setStatus("历史通信读取失败。")
 				return
@@ -1827,6 +1863,7 @@ func (a *legacyApp) refreshHistory() {
 			if len(snapshot.CollectionErrors) > 0 {
 				warn = fmt.Sprintf("，采集提示 %d 条", len(snapshot.CollectionErrors))
 			}
+			a.completeProgress("history", progressToken, "历史通信")
 			a.setStatus(fmt.Sprintf("历史通信完成：%d 条%s。", len(rows), warn))
 		})
 	}()
@@ -1839,6 +1876,7 @@ func (a *legacyApp) refreshFileTrace() {
 		return
 	}
 	a.fileTraceStarted = true
+	progressToken := a.beginProgress("file-trace", "文件痕迹", false, 0)
 	a.setStatus("正在采集近期文件和传统取证痕迹，请等待...")
 	go func() {
 		snapshot, err := filetrace.Collect(opts)
@@ -1846,6 +1884,7 @@ func (a *legacyApp) refreshFileTrace() {
 		warnings := fileTraceWarningRows(snapshot.GeneratedAt, snapshot.CollectionErrors)
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("file-trace", progressToken, "文件痕迹")
 				a.showError("文件痕迹扫描失败", err)
 				a.setStatus("文件痕迹扫描失败。")
 				return
@@ -1858,6 +1897,7 @@ func (a *legacyApp) refreshFileTrace() {
 			if len(snapshot.CollectionErrors) > 0 {
 				warn = fmt.Sprintf("，采集提示 %d 条", len(snapshot.CollectionErrors))
 			}
+			a.completeProgress("file-trace", progressToken, "文件痕迹")
 			a.setStatus(fmt.Sprintf("文件痕迹完成：%d 条%s。", len(rows), warn))
 		})
 	}()
@@ -1874,6 +1914,7 @@ func (a *legacyApp) refreshRegistry() {
 		maxRecords = parsed
 	}
 	a.registryStarted = true
+	progressToken := a.beginProgress("registry", "注册表异常", false, 0)
 	a.setStatus("正在扫描注册表高价值区域；旧系统上可能需要十余秒...")
 	processes := append([]process.Info(nil), a.processItems...)
 	machine := a.hostSnapshot
@@ -1892,6 +1933,7 @@ func (a *legacyApp) refreshRegistry() {
 		rows := registryRows(snapshot.Records)
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("registry", progressToken, "注册表异常")
 				a.showError("注册表异常扫描失败", err)
 				a.setStatus("注册表异常扫描失败。")
 				return
@@ -1903,6 +1945,7 @@ func (a *legacyApp) refreshRegistry() {
 			if snapshot.Truncated {
 				truncated = "，已按时间或数量上限停止"
 			}
+			a.completeProgress("registry", progressToken, "注册表异常")
 			a.setStatus(fmt.Sprintf("注册表异常扫描完成：%d 条，扫描键 %d、值 %d，采集提示 %d 条%s。", len(rows), snapshot.ScannedKeys, snapshot.ScannedValues, len(snapshot.CollectionErrors), truncated))
 		})
 	}()
@@ -2286,6 +2329,7 @@ func (a *legacyApp) runAIRequest(question string, reset bool) {
 	}
 
 	a.aiBusy = true
+	progressToken := a.beginProgress("ai", "AI 分析", false, 0)
 	a.setSummary(a.aiSummary, "正在请求 AI 分析，旧系统上证据采集和网络请求可能需要几十秒。")
 	a.setStatus("AI 分析请求已开始...")
 	go func(req aianalysis.AnalyzeRequest, messages []aianalysis.Message) {
@@ -2293,6 +2337,7 @@ func (a *legacyApp) runAIRequest(question string, reset bool) {
 		a.mw.Synchronize(func() {
 			a.aiBusy = false
 			if err != nil {
+				a.failProgress("ai", progressToken, "AI 分析")
 				a.showError("AI 分析失败", err)
 				a.setSummary(a.aiSummary, "AI 分析失败。")
 				a.setStatus("AI 分析失败。")
@@ -2307,6 +2352,7 @@ func (a *legacyApp) runAIRequest(question string, reset bool) {
 				_ = a.aiFollowUp.SetText("")
 			}
 			a.setSummary(a.aiSummary, aiSummaryText(resp))
+			a.completeProgress("ai", progressToken, "AI 分析")
 			a.setStatus(fmt.Sprintf("AI 分析完成：%s / %s。", resp.Provider, resp.Model))
 		})
 	}(req, messages)
@@ -2423,15 +2469,18 @@ func (a *legacyApp) exportSelectedRegistryValue() {
 		return
 	}
 	path := ensureZIPExt(dlg.FilePath)
+	progressToken := a.beginProgress("registry-export", "注册表值导出", false, 0)
 	a.setStatus("正在只读导出选中的注册表值...")
 	go func() {
 		err := writeRegistryEvidenceArchive(path, ref)
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("registry-export", progressToken, "注册表值导出")
 				a.showError("导出注册表值失败", err)
 				a.setStatus("注册表值导出失败。")
 				return
 			}
+			a.completeProgress("registry-export", progressToken, "注册表值导出")
 			a.setStatus("注册表值证据已导出：" + path)
 		})
 	}()
@@ -2457,15 +2506,22 @@ func (a *legacyApp) exportEvidencePackage() {
 		return
 	}
 	path := ensureZIPExt(dlg.FilePath)
+	progressToken := a.beginProgress("evidence-package", "取证包：准备", true, 5)
 	a.setStatus("正在导出取证包，后台采集进程、主机信息、关注项和事件日志...")
 	go func() {
-		err := writeEvidencePackage(path, opts, a.hashLimitBytes)
+		err := writeEvidencePackage(path, opts, a.hashLimitBytes, func(value int, label string) {
+			a.mw.Synchronize(func() {
+				a.updateProgress("evidence-package", progressToken, value, label)
+			})
+		})
 		a.mw.Synchronize(func() {
 			if err != nil {
+				a.failProgress("evidence-package", progressToken, "取证包导出")
 				a.showError("导出取证包失败", err)
 				a.setStatus("取证包导出失败。")
 				return
 			}
+			a.completeProgress("evidence-package", progressToken, "取证包导出")
 			a.setStatus("取证包已导出：" + path)
 		})
 	}()
@@ -2494,6 +2550,144 @@ func (a *legacyApp) exportModel(name string, model *tableModel) {
 		return
 	}
 	a.setStatus("已导出：" + path)
+}
+
+// Progress methods are called on the Walk UI thread. Background collectors
+// marshal updates through MainWindow.Synchronize before touching this state.
+func (a *legacyApp) beginProgress(key, label string, determinate bool, value int) uint64 {
+	a.progressSeq++
+	token := a.progressSeq
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	a.progressTasks[key] = progressTask{
+		label:       label,
+		value:       value,
+		determinate: determinate,
+		generation:  token,
+	}
+	a.renderProgress()
+	return token
+}
+
+func (a *legacyApp) updateProgress(key string, token uint64, value int, label string) {
+	task, ok := a.progressTasks[key]
+	if !ok || task.generation != token {
+		return
+	}
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	task.value = value
+	if strings.TrimSpace(label) != "" {
+		task.label = label
+	}
+	a.progressTasks[key] = task
+	a.renderProgress()
+}
+
+func (a *legacyApp) completeProgress(key string, token uint64, label string) {
+	task, ok := a.progressTasks[key]
+	if !ok || task.generation != token {
+		return
+	}
+	delete(a.progressTasks, key)
+	if len(a.progressTasks) > 0 {
+		a.renderProgress()
+		return
+	}
+	if strings.TrimSpace(label) == "" {
+		label = task.label
+	}
+	if a.progressBar != nil {
+		_ = a.progressBar.SetMarqueeMode(false)
+		a.progressBar.SetValue(100)
+	}
+	if a.progressText != nil {
+		_ = a.progressText.SetText(label + "：100%")
+	}
+}
+
+func (a *legacyApp) failProgress(key string, token uint64, label string) {
+	task, ok := a.progressTasks[key]
+	if !ok || task.generation != token {
+		return
+	}
+	delete(a.progressTasks, key)
+	if len(a.progressTasks) > 0 {
+		a.renderProgress()
+		return
+	}
+	if strings.TrimSpace(label) == "" {
+		label = task.label
+	}
+	if a.progressBar != nil {
+		_ = a.progressBar.SetMarqueeMode(false)
+		a.progressBar.SetValue(0)
+	}
+	if a.progressText != nil {
+		_ = a.progressText.SetText(label + "：失败")
+	}
+}
+
+func (a *legacyApp) cancelProgress(key string) {
+	if _, ok := a.progressTasks[key]; !ok {
+		return
+	}
+	delete(a.progressTasks, key)
+	if len(a.progressTasks) > 0 {
+		a.renderProgress()
+		return
+	}
+	if a.progressBar != nil {
+		_ = a.progressBar.SetMarqueeMode(false)
+		a.progressBar.SetValue(0)
+	}
+	if a.progressText != nil {
+		_ = a.progressText.SetText("采集进度：就绪")
+	}
+}
+
+func (a *legacyApp) renderProgress() {
+	if a.progressBar == nil || a.progressText == nil || len(a.progressTasks) == 0 {
+		return
+	}
+	anyIndeterminate := false
+	minimum := 100
+	label := ""
+	for _, task := range a.progressTasks {
+		if label == "" {
+			label = task.label
+		}
+		if !task.determinate {
+			anyIndeterminate = true
+		}
+		if task.value < minimum {
+			minimum = task.value
+		}
+	}
+	if anyIndeterminate {
+		_ = a.progressBar.SetMarqueeMode(true)
+		if len(a.progressTasks) == 1 {
+			_ = a.progressText.SetText(label + "：采集中")
+		} else {
+			_ = a.progressText.SetText(fmt.Sprintf("并行采集 %d 项", len(a.progressTasks)))
+		}
+		return
+	}
+	_ = a.progressBar.SetMarqueeMode(false)
+	a.progressBar.SetValue(minimum)
+	if len(a.progressTasks) == 1 {
+		_ = a.progressText.SetText(fmt.Sprintf("%s：%d%%", label, minimum))
+	} else {
+		_ = a.progressText.SetText(fmt.Sprintf("并行采集 %d 项：%d%%", len(a.progressTasks), minimum))
+	}
 }
 
 func (a *legacyApp) setStatus(text string) {
@@ -3828,7 +4022,7 @@ func packageFileTraceOptions(eventOpts securitylog.Options) filetrace.Options {
 	return filetrace.Options{Hours: hours, MaxRecords: maxRecords}
 }
 
-func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitBytes int64) error {
+func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitBytes int64, progress func(int, string)) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -3840,16 +4034,24 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 
 	generatedAt := time.Now().Format("2006-01-02 15:04:05")
 	processes, procErr := process.Collect(process.Options{HashLimitBytes: hashLimitBytes})
+	reportEvidenceProgress(progress, 14, "取证包：进程")
 	hostSnapshot, hostErr := host.Collect(host.Options{HashLimitBytes: hashLimitBytes})
+	reportEvidenceProgress(progress, 28, "取证包：主机信息")
 	registrySnapshot, registryErr := registryanomaly.Collect(registryanomaly.Options{MaxRecords: 500, MaxKeys: 6000, MaxValues: 30000, MaxDepth: 5, MaxDataSize: 4 * 1024 * 1024, Timeout: 12 * time.Second})
 	if registryErr == nil {
 		registrySnapshot = registryanomaly.Correlate(registrySnapshot, processes, hostSnapshot)
 	}
+	reportEvidenceProgress(progress, 40, "取证包：注册表")
 	securitySnapshot, eventErr := securitylog.Collect(eventOpts)
+	reportEvidenceProgress(progress, 54, "取证包：事件日志")
 	historySnapshot, historyErr := history.Collect(history.Options{StartTime: eventOpts.StartTime, EndTime: eventOpts.EndTime, MaxRecords: eventOpts.MaxRecords})
+	reportEvidenceProgress(progress, 66, "取证包：历史通信")
 	fileTraceSnapshot, fileTraceErr := filetrace.Collect(packageFileTraceOptions(eventOpts))
+	reportEvidenceProgress(progress, 78, "取证包：文件痕迹")
 	connections, connectionErr := process.CollectConnections()
+	reportEvidenceProgress(progress, 84, "取证包：实时连接")
 	moduleRows, moduleErr := packageModuleRows(processes, hashLimitBytes)
+	reportEvidenceProgress(progress, 92, "取证包：模块与报告")
 	findings := analysis.BuildFindings(processes, hostSnapshot)
 
 	if err := writeZipText(zw, "summary.txt", evidenceSummary(generatedAt, processes, hostSnapshot, findings, registrySnapshot, securitySnapshot, historySnapshot, fileTraceSnapshot, procErr, hostErr, registryErr, eventErr, historyErr, fileTraceErr, connectionErr, moduleErr)); err != nil {
@@ -3969,7 +4171,14 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 			return err
 		}
 	}
+	reportEvidenceProgress(progress, 98, "取证包：写入压缩包")
 	return nil
+}
+
+func reportEvidenceProgress(progress func(int, string), value int, label string) {
+	if progress != nil {
+		progress(value, label)
+	}
 }
 
 func writeZipCSV(zw *zip.Writer, name string, headers []string, rows [][]string) error {
