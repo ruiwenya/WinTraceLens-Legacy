@@ -48,6 +48,7 @@ const (
 	defaultWindowY      = 40
 	defaultWindowWidth  = 1000
 	defaultWindowHeight = 680
+	comboSetMinVisible  = 0x1701
 )
 
 var processColumns = []tableColumn{
@@ -580,6 +581,7 @@ func (a *legacyApp) run() error {
 	if err := mainWindow.Create(); err != nil {
 		return err
 	}
+	a.configureComboDropDowns()
 
 	a.mw.Starting().Once(func() {
 		a.refreshProcesses()
@@ -590,6 +592,55 @@ func (a *legacyApp) run() error {
 		return fmt.Errorf("窗口已退出，返回码 %d", returnCode)
 	}
 	return nil
+}
+
+func (a *legacyApp) configureComboDropDowns() {
+	setComboMinVisible(a.fileTraceKind, 10)
+	setComboMinVisible(a.registryRisk, 4)
+	setComboMinVisible(a.aiProvider, 5)
+	setComboMinVisible(a.aiModel, 10)
+}
+
+func setComboMinVisible(combo *walk.ComboBox, count int) {
+	if combo == nil || count <= 0 {
+		return
+	}
+	combo.SendMessage(comboSetMinVisible, uintptr(count), 0)
+
+	itemCount := int(int32(combo.SendMessage(win.CB_GETCOUNT, 0, 0)))
+	if itemCount <= 0 {
+		return
+	}
+	if count > itemCount {
+		count = itemCount
+	}
+	itemHeight := int(combo.SendMessage(win.CB_GETITEMHEIGHT, 0, 0))
+	selectionHeight := int(combo.SendMessage(win.CB_GETITEMHEIGHT, ^uintptr(0), 0))
+	if itemHeight <= 0 || itemHeight > 256 {
+		itemHeight = 20
+	}
+	if selectionHeight <= 0 || selectionHeight > 256 {
+		selectionHeight = itemHeight
+	}
+	desiredHeight := selectionHeight + itemHeight*count + 8
+	var droppedRect win.RECT
+	combo.SendMessage(win.CB_GETDROPPEDCONTROLRECT, 0, uintptr(unsafe.Pointer(&droppedRect)))
+	if int(droppedRect.Bottom-droppedRect.Top) >= desiredHeight-2 {
+		return
+	}
+	var comboRect win.RECT
+	if !win.GetWindowRect(combo.Handle(), &comboRect) {
+		return
+	}
+	win.SetWindowPos(
+		combo.Handle(),
+		0,
+		0,
+		0,
+		comboRect.Right-comboRect.Left,
+		int32(desiredHeight),
+		win.SWP_NOMOVE|win.SWP_NOZORDER|win.SWP_NOACTIVATE,
+	)
 }
 
 func (a *legacyApp) header() Widget {
@@ -959,7 +1010,7 @@ func (a *legacyApp) fileTraceToolbar() Widget {
 				Label{Text: "条数", TextColor: walk.RGB(50, 67, 89)},
 				LineEdit{AssignTo: &a.fileTraceMax, Text: "500", MaxSize: Size{Width: 70}},
 				Label{Text: "取证源", TextColor: walk.RGB(50, 67, 89)},
-				ComboBox{AssignTo: &a.fileTraceKind, Model: fileTraceKindOptions(), CurrentIndex: 0, MinSize: Size{Width: 140}, MaxSize: Size{Width: 170}, OnCurrentIndexChanged: a.applyFileTraceFilter},
+				ComboBox{AssignTo: &a.fileTraceKind, Model: fileTraceKindOptions(), CurrentIndex: 0, MinSize: Size{Width: 140}, MaxSize: Size{Width: 170}, OnBoundsChanged: func() { setComboMinVisible(a.fileTraceKind, 10) }, OnCurrentIndexChanged: a.applyFileTraceFilter},
 				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
 				LineEdit{AssignTo: &a.fileTraceSearch, StretchFactor: 1, OnTextChanged: a.applyFileTraceFilter},
 				PushButton{Text: "开始扫描", MinSize: Size{Width: 92}, OnClicked: a.refreshFileTrace},
@@ -981,7 +1032,7 @@ func (a *legacyApp) registryToolbar() Widget {
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
 				Label{Text: "风险", TextColor: walk.RGB(50, 67, 89)},
-				ComboBox{AssignTo: &a.registryRisk, Model: []string{"全部风险", "高风险", "中风险", "低风险"}, CurrentIndex: 0, MinSize: Size{Width: 100}, MaxSize: Size{Width: 120}, OnCurrentIndexChanged: a.applyRegistryFilter},
+				ComboBox{AssignTo: &a.registryRisk, Model: []string{"全部风险", "高风险", "中风险", "低风险"}, CurrentIndex: 0, MinSize: Size{Width: 100}, MaxSize: Size{Width: 120}, OnBoundsChanged: func() { setComboMinVisible(a.registryRisk, 4) }, OnCurrentIndexChanged: a.applyRegistryFilter},
 				Label{Text: "最多", TextColor: walk.RGB(50, 67, 89)},
 				LineEdit{AssignTo: &a.registryMax, Text: "500", MaxSize: Size{Width: 70}},
 				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
@@ -1005,9 +1056,9 @@ func (a *legacyApp) aiToolbar() Widget {
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
 				Label{Text: "厂商", TextColor: walk.RGB(50, 67, 89)},
-				ComboBox{AssignTo: &a.aiProvider, Model: []string{"OpenAI", "DeepSeek", "Kimi", "Qwen", "Custom"}, CurrentIndex: 0, Editable: true, MinSize: Size{Width: 130}, MaxSize: Size{Width: 150}, OnCurrentIndexChanged: a.onAIProviderChanged},
+				ComboBox{AssignTo: &a.aiProvider, Model: []string{"OpenAI", "DeepSeek", "Kimi", "Qwen", "Custom"}, CurrentIndex: 0, Editable: true, MinSize: Size{Width: 130}, MaxSize: Size{Width: 150}, OnBoundsChanged: func() { setComboMinVisible(a.aiProvider, 5) }, OnCurrentIndexChanged: a.onAIProviderChanged},
 				Label{Text: "模型", TextColor: walk.RGB(50, 67, 89)},
-				ComboBox{AssignTo: &a.aiModel, Model: aiModelOptions(), CurrentIndex: 0, Editable: true, MinSize: Size{Width: 190}, MaxSize: Size{Width: 240}},
+				ComboBox{AssignTo: &a.aiModel, Model: aiModelOptions(), CurrentIndex: 0, Editable: true, MinSize: Size{Width: 190}, MaxSize: Size{Width: 240}, OnBoundsChanged: func() { setComboMinVisible(a.aiModel, 10) }},
 				HSpacer{},
 				PushButton{Text: "开始分析", MinSize: Size{Width: 94}, OnClicked: a.startAIAnalysis},
 				PushButton{Text: "复制结果", MinSize: Size{Width: 86}, OnClicked: a.copyAITranscript},
