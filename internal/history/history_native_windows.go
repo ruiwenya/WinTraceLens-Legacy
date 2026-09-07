@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ruiwenya/WinTraceLens/internal/process"
 	"github.com/ruiwenya/WinTraceLens/internal/winexec"
 )
 
@@ -62,6 +63,9 @@ func collectNativeHistory(opts Options, maxRecords int) (Snapshot, error) {
 	if staticErr != nil {
 		snapshot.CollectionErrors = append(snapshot.CollectionErrors, "基础通信快照: "+staticErr.Error())
 	} else {
+		if err := enrichNetstatProcessDetails(staticSnapshot.Records); err != nil {
+			staticSnapshot.CollectionErrors = append(staticSnapshot.CollectionErrors, "netstat 进程信息: "+err.Error())
+		}
 		snapshot.Records = append(snapshot.Records, staticSnapshot.Records...)
 		snapshot.CollectionErrors = append(snapshot.CollectionErrors, staticSnapshot.CollectionErrors...)
 	}
@@ -70,9 +74,71 @@ func collectNativeHistory(opts Options, maxRecords int) (Snapshot, error) {
 	snapshot.Records = append(snapshot.Records, firewallRecords...)
 	snapshot.CollectionErrors = append(snapshot.CollectionErrors, firewallErrors...)
 
-	snapshot.Records = limitHistoryRecords(deduplicateHistoryRecords(snapshot.Records), maxRecords)
+	snapshot.Records, eventErrors = limitHistoryRecordsBySource(deduplicateHistoryRecords(snapshot.Records), maxRecords)
+	snapshot.CollectionErrors = append(snapshot.CollectionErrors, eventErrors...)
 	snapshot.CollectionErrors = uniqueHistoryStrings(localizeHistoryErrors(snapshot.CollectionErrors))
 	return snapshot, nil
+}
+
+func enrichNetstatProcessDetails(records []Record) error {
+	pids := make([]uint32, 0)
+	seen := make(map[uint32]struct{})
+	for i := range records {
+		if records[i].Source != "netstat 快照" {
+			continue
+		}
+		pid64, err := strconv.ParseUint(strings.TrimSpace(records[i].PID), 10, 32)
+		if err != nil || pid64 == 0 {
+			continue
+		}
+		pid := uint32(pid64)
+		if _, ok := seen[pid]; !ok {
+			seen[pid] = struct{}{}
+			pids = append(pids, pid)
+		}
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+
+	identities, err := process.ResolveIdentities(pids)
+	if err != nil {
+		return err
+	}
+	enrichNetstatProcessDetailsFromMap(records, identities)
+	return nil
+}
+
+func enrichNetstatProcessDetailsFromMap(records []Record, identities map[uint32]process.Identity) {
+	for i := range records {
+		if records[i].Source != "netstat 快照" {
+			continue
+		}
+		pid64, err := strconv.ParseUint(strings.TrimSpace(records[i].PID), 10, 32)
+		if err != nil {
+			continue
+		}
+		identity, ok := identities[uint32(pid64)]
+		if !ok {
+			continue
+		}
+		if identity.Path != "" {
+			records[i].Process = identity.Path
+		} else {
+			records[i].Process = identity.Name
+		}
+		details := make([]string, 0, 3)
+		if identity.Name != "" {
+			details = append(details, "进程名="+identity.Name)
+		}
+		if identity.Path != "" {
+			details = append(details, "进程路径="+identity.Path)
+		}
+		if records[i].Details != "" {
+			details = append(details, records[i].Details)
+		}
+		records[i].Details = strings.Join(details, "; ")
+	}
 }
 
 func collectHistoryEvents(opts Options, maxRecords int) ([]Record, []string) {
@@ -402,9 +468,61 @@ func deduplicateHistoryRecords(records []Record) []Record {
 }
 
 func limitHistoryRecords(records []Record, maxRecords int) []Record {
-	timed := make([]Record, 0, len(records))
-	static := make([]Record, 0, len(records))
+	limited, _ := limitHistoryRecordsBySource(records, maxRecords)
+	return limited
+}
+
+func limitHistoryRecordsBySource(records []Record, maxRecords int) ([]Record, []string) {
+	if maxRecords <= 0 || len(records) == 0 {
+		return nil, nil
+	}
+	groups := make(map[string][]Record)
+	var sources []string
 	for _, record := range records {
+		source := strings.TrimSpace(record.Source)
+		if source == "" {
+			source = "未知来源"
+		}
+		if _, ok := groups[source]; !ok {
+			sources = append(sources, source)
+		}
+		groups[source] = append(groups[source], record)
+	}
+	for _, source := range sources {
+		sort.SliceStable(groups[source], func(i, j int) bool {
+			left := groups[source][i].Time
+			right := groups[source][j].Time
+			if left == "" || right == "" {
+				return left != ""
+			}
+			return left > right
+		})
+	}
+	selected := make([]Record, 0, maxRecords)
+	selectedBySource := make(map[string]int, len(sources))
+	for round := 0; len(selected) < maxRecords; round++ {
+		added := false
+		for _, source := range sources {
+			if round >= len(groups[source]) || len(selected) >= maxRecords {
+				continue
+			}
+			selected = append(selected, groups[source][round])
+			selectedBySource[source]++
+			added = true
+		}
+		if !added {
+			break
+		}
+	}
+	var warnings []string
+	for _, source := range sources {
+		if selectedBySource[source] < len(groups[source]) {
+			warnings = append(warnings, fmt.Sprintf("%s: 共 %d 条，受总上限影响保留 %d 条；请缩小时间范围继续核查。", source, len(groups[source]), selectedBySource[source]))
+		}
+	}
+	timed := make([]Record, 0, len(selected))
+	static := make([]Record, 0, len(selected))
+	for _, record := range selected {
 		if strings.TrimSpace(record.Time) == "" {
 			static = append(static, record)
 		} else {
@@ -412,26 +530,7 @@ func limitHistoryRecords(records []Record, maxRecords int) []Record {
 		}
 	}
 	sort.SliceStable(timed, func(i, j int) bool { return timed[i].Time > timed[j].Time })
-	if len(records) <= maxRecords {
-		return append(timed, static...)
-	}
-	reserve := maxRecords / 4
-	if reserve < 20 {
-		reserve = 20
-	}
-	if reserve > len(static) {
-		reserve = len(static)
-	}
-	if reserve > maxRecords {
-		reserve = maxRecords
-	}
-	timedLimit := maxRecords - reserve
-	if timedLimit > len(timed) {
-		timedLimit = len(timed)
-	}
-	out := append([]Record(nil), timed[:timedLimit]...)
-	out = append(out, static[:reserve]...)
-	return out
+	return append(timed, static...), warnings
 }
 
 func uniqueHistoryStrings(items []string) []string {

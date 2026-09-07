@@ -8,11 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
+	"unsafe"
 
 	"github.com/ruiwenya/WinTraceLens/internal/winexec"
 )
+
+var procHistoryMultiByteToWideChar = syscall.NewLazyDLL("kernel32.dll").NewProc("MultiByteToWideChar")
 
 func Collect(opts Options) (Snapshot, error) {
 	maxRecords := opts.MaxRecords
@@ -468,7 +473,45 @@ func decodeCommandOutput(raw []byte) string {
 	if looksUTF16LE(raw) {
 		return decodeUTF16LE(raw)
 	}
-	return string(raw)
+	if utf8.Valid(raw) {
+		return string(raw)
+	}
+	for _, codePage := range []uint32{1, 0, 936} {
+		if decoded, ok := decodeWindowsCodePage(raw, codePage); ok {
+			return decoded
+		}
+	}
+	return strings.ToValidUTF8(string(raw), "\ufffd")
+}
+
+func decodeWindowsCodePage(raw []byte, codePage uint32) (string, bool) {
+	if len(raw) == 0 {
+		return "", true
+	}
+	needed, _, _ := procHistoryMultiByteToWideChar.Call(
+		uintptr(codePage),
+		0,
+		uintptr(unsafe.Pointer(&raw[0])),
+		uintptr(len(raw)),
+		0,
+		0,
+	)
+	if needed == 0 {
+		return "", false
+	}
+	decoded := make([]uint16, int(needed))
+	written, _, _ := procHistoryMultiByteToWideChar.Call(
+		uintptr(codePage),
+		0,
+		uintptr(unsafe.Pointer(&raw[0])),
+		uintptr(len(raw)),
+		uintptr(unsafe.Pointer(&decoded[0])),
+		needed,
+	)
+	if written == 0 {
+		return "", false
+	}
+	return string(utf16.Decode(decoded[:int(written)])), true
 }
 
 func looksUTF16LE(raw []byte) bool {
@@ -501,6 +544,12 @@ func localizeHistoryErrors(items []string) []string {
 		switch {
 		case strings.HasPrefix(item, "Sysmon:") && (strings.Contains(lower, "there is not an event log") || strings.Contains(item, "没有与")):
 			out = append(out, "Sysmon: 未发现 Sysmon 事件日志（Microsoft-Windows-Sysmon/Operational），可能未安装或未启用 Sysmon。")
+		case strings.HasPrefix(item, "Sysmon:") && strings.Contains(item, "wevtutil 查询失败"):
+			message := strings.TrimSpace(strings.TrimPrefix(item, "Sysmon: wevtutil 查询失败:"))
+			if message == "" || strings.ContainsRune(message, '\ufffd') {
+				message = "系统未返回可识别的错误文本"
+			}
+			out = append(out, "Sysmon: 查询失败，可能未安装、未启用或当前系统不支持 Sysmon 事件通道。系统返回: "+message)
 		case strings.HasPrefix(item, "DNS Client 日志:") && (strings.Contains(lower, "there is not an event log") || strings.Contains(item, "没有与")):
 			out = append(out, "DNS Client 日志: 未发现 Microsoft-Windows-DNS-Client/Operational，当前系统可能不支持该日志。")
 		case strings.HasPrefix(item, "DNS Client 日志:") && strings.Contains(lower, "disabled"):

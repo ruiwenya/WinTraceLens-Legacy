@@ -28,6 +28,11 @@ type Options struct {
 	SkipSignatures bool
 }
 
+type Identity struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
 type ModuleInfo struct {
 	Name         string `json:"name"`
 	Kind         string `json:"kind"`

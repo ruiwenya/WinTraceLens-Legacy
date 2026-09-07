@@ -39,7 +39,7 @@ import (
 	"github.com/ruiwenya/WinTraceLens/internal/threatanalysis"
 )
 
-var version = "1.1.0-legacy"
+var version = "1.1.1-legacy"
 
 var shellExecuteW = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
 
@@ -216,6 +216,13 @@ var eventColumns = []tableColumn{
 	{"服务", 170},
 	{"命令", 360},
 	{"详情", 460},
+}
+
+var eventExportHeaders = []string{
+	"时间", "分类", "来源", "事件ID", "动作", "账户", "域", "操作者",
+	"登录类型", "登录类型说明", "来源IP", "来源端口", "工作站", "进程",
+	"服务名", "命令/路径", "认证包", "状态", "失败原因", "目标SID",
+	"Provider", "级别", "消息", "详情",
 }
 
 var historyColumns = []tableColumn{
@@ -453,6 +460,7 @@ type legacyApp struct {
 	eventModel    *tableModel
 	eventView     *walk.TableView
 	eventRows     [][]string
+	eventItems    []securitylog.Event
 	eventWarnings [][]string
 	eventCategory string
 
@@ -962,7 +970,7 @@ func (a *legacyApp) eventToolbar() Widget {
 				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
 				LineEdit{AssignTo: &a.eventSearch, StretchFactor: 1, OnTextChanged: a.applyEventFilter},
 				PushButton{Text: "读取日志", MinSize: Size{Width: 92}, OnClicked: a.refreshEvents},
-				PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: func() { a.exportModel("security-events", a.eventModel) }},
+				PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: a.exportCurrentEvents},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
 				Label{Text: "分类", TextColor: walk.RGB(50, 67, 89)},
@@ -1569,12 +1577,64 @@ func (a *legacyApp) connectionContextMenu() []MenuItem {
 
 func (a *legacyApp) eventContextMenu() []MenuItem {
 	return []MenuItem{
-		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.eventView, a.eventModel, "事件日志详情") }},
-		Action{Text: "复制详情", OnTriggered: func() { a.copyTableColumn(a.eventView, a.eventModel, 10, "详情") }},
-		Action{Text: "保存详情", OnTriggered: func() { a.saveTableRowDetails(a.eventView, a.eventModel, "event-detail") }},
+		Action{Text: "查看详情", OnTriggered: a.showCurrentEventDetails},
+		Action{Text: "复制详情", OnTriggered: a.copyCurrentEventDetails},
+		Action{Text: "保存详情", OnTriggered: a.saveCurrentEventDetails},
 		Separator{},
 		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.eventView, a.eventModel, "事件日志") }},
 	}
+}
+
+func (a *legacyApp) selectedEvent() (securitylog.Event, bool) {
+	row := currentTableRow(a.eventView, a.eventModel)
+	identity := valueAt(row, len(eventColumns))
+	if identity == "" {
+		return securitylog.Event{}, false
+	}
+	for _, item := range a.eventItems {
+		if eventIdentity(item) == identity {
+			return item, true
+		}
+	}
+	return securitylog.Event{}, false
+}
+
+func (a *legacyApp) currentEventDetailText() string {
+	if item, ok := a.selectedEvent(); ok {
+		return eventDetailText(item)
+	}
+	return a.tableRowDetailText(a.eventView, a.eventModel)
+}
+
+func (a *legacyApp) showCurrentEventDetails() {
+	text := a.currentEventDetailText()
+	if strings.TrimSpace(text) == "" {
+		a.setStatus("请先选择一条事件日志。")
+		return
+	}
+	a.showCopyableTextDialog("事件日志详情", text)
+}
+
+func (a *legacyApp) copyCurrentEventDetails() {
+	text := a.currentEventDetailText()
+	if strings.TrimSpace(text) == "" {
+		a.setStatus("请先选择一条事件日志。")
+		return
+	}
+	if err := walk.Clipboard().SetText(text); err != nil {
+		a.showError("复制详情失败", err)
+		return
+	}
+	a.setStatus("事件日志完整详情已复制。")
+}
+
+func (a *legacyApp) saveCurrentEventDetails() {
+	text := a.currentEventDetailText()
+	if strings.TrimSpace(text) == "" {
+		a.setStatus("请先选择一条事件日志。")
+		return
+	}
+	a.saveDetailText(a.mw, "event-detail", text)
 }
 
 func (a *legacyApp) historyContextMenu() []MenuItem {
@@ -1873,6 +1933,7 @@ func (a *legacyApp) refreshEvents() {
 				return
 			}
 			a.eventRows = rows
+			a.eventItems = append([]securitylog.Event(nil), snapshot.Events...)
 			a.eventWarnings = warnings
 			a.setSummary(a.eventSummary, eventSummaryText(snapshot.Events, snapshot.CollectionErrors))
 			a.applyEventFilter()
@@ -2557,10 +2618,11 @@ func (a *legacyApp) exportEvidencePackage() {
 		return
 	}
 	path := ensureZIPExt(dlg.FilePath)
+	current := a.captureCurrentEvidence()
 	progressToken := a.beginProgress("evidence-package", "取证包：准备", true, 5)
-	a.setStatus("正在导出取证包，后台采集进程、主机信息、关注项和事件日志...")
+	a.setStatus("正在保留当前界面证据并补充采集取证包...")
 	go func() {
-		err := writeEvidencePackage(path, opts, a.hashLimitBytes, func(value int, label string) {
+		err := writeEvidencePackage(path, opts, a.hashLimitBytes, current, func(value int, label string) {
 			a.mw.Synchronize(func() {
 				a.updateProgress("evidence-package", progressToken, value, label)
 			})
@@ -2576,6 +2638,44 @@ func (a *legacyApp) exportEvidencePackage() {
 			a.setStatus("取证包已导出：" + path)
 		})
 	}()
+}
+
+type legacyEvidenceSnapshot struct {
+	CapturedAt          string
+	Processes           [][]string
+	Host                [][]string
+	Findings            [][]string
+	Memory              [][]string
+	Drivers             [][]string
+	Events              []securitylog.Event
+	EventWarnings       [][]string
+	History             [][]string
+	FileTraces          [][]string
+	Registry            [][]string
+	SelectedModules     [][]string
+	SelectedConnections [][]string
+	SelectedPID         uint32
+	SelectedName        string
+}
+
+func (a *legacyApp) captureCurrentEvidence() legacyEvidenceSnapshot {
+	return legacyEvidenceSnapshot{
+		CapturedAt:          time.Now().Format("2006-01-02 15:04:05"),
+		Processes:           copyRows(a.processRows),
+		Host:                copyRows(a.hostAllRows),
+		Findings:            copyRows(a.findingRows),
+		Memory:              copyRows(a.memoryRows),
+		Drivers:             copyRows(a.driverRows),
+		Events:              append([]securitylog.Event(nil), a.eventItems...),
+		EventWarnings:       copyRows(a.eventWarnings),
+		History:             appendRows(copyRows(a.historyRows), a.historyWarnings),
+		FileTraces:          appendRows(copyRows(a.fileTraceRows), a.fileTraceWarnings),
+		Registry:            copyRows(a.registryRows),
+		SelectedModules:     a.moduleModel.Rows(),
+		SelectedConnections: a.connModel.Rows(),
+		SelectedPID:         a.selectedPID,
+		SelectedName:        a.selectedName,
+	}
 }
 
 func (a *legacyApp) exportModel(name string, model *tableModel) {
@@ -2601,6 +2701,48 @@ func (a *legacyApp) exportModel(name string, model *tableModel) {
 		return
 	}
 	a.setStatus("已导出：" + path)
+}
+
+func (a *legacyApp) exportCurrentEvents() {
+	if a.eventModel == nil {
+		return
+	}
+	dlg := walk.FileDialog{
+		Title:    "导出事件日志 CSV",
+		Filter:   "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*",
+		FilePath: defaultCSVName("security-events"),
+	}
+	ok, err := dlg.ShowSave(a.mw)
+	if err != nil {
+		a.showError("导出失败", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	path := ensureCSVExt(dlg.FilePath)
+	rows := eventExportRows(a.eventModel.Rows(), a.eventItems)
+	if err := writeCSVFile(path, eventExportHeaders, rows); err != nil {
+		a.showError("导出失败", err)
+		return
+	}
+	a.setStatus("事件日志已按当前筛选导出，命令、消息和详情保留完整原文：" + path)
+}
+
+func eventExportRows(displayRows [][]string, items []securitylog.Event) [][]string {
+	byID := make(map[string]securitylog.Event, len(items))
+	for _, item := range items {
+		byID[eventIdentity(item)] = item
+	}
+	rows := make([][]string, 0, len(displayRows))
+	for _, row := range displayRows {
+		if item, ok := byID[valueAt(row, len(eventColumns))]; ok {
+			rows = append(rows, eventFullRow(item))
+			continue
+		}
+		rows = append(rows, eventSummaryExportRow(row))
+	}
+	return rows
 }
 
 // Progress methods are called on the Walk UI thread. Background collectors
@@ -3391,6 +3533,7 @@ func eventRows(items []securitylog.Event) [][]string {
 			item.ServiceName,
 			command,
 			details,
+			eventIdentity(item),
 		})
 	}
 	return rows
@@ -3652,6 +3795,55 @@ func compactStatusValue(value string) string {
 
 func eventDisplayText(value string) string {
 	return limitRunes(strings.Join(strings.Fields(value), " "), 360)
+}
+
+func eventIdentity(item securitylog.Event) string {
+	value := strings.Join([]string{
+		item.Time, item.Category, item.Source, item.EventID, item.Action, item.Account,
+		item.Domain, item.Subject, item.LogonType, item.SourceIP, item.SourcePort,
+		item.Workstation, item.Process, item.ServiceName, item.Command, item.Message, item.Details,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func eventFullRow(item securitylog.Event) []string {
+	return []string{
+		item.Time, item.Category, item.Source, item.EventID, item.Action, item.Account,
+		item.Domain, item.Subject, item.LogonType, item.LogonTypeName, item.SourceIP,
+		item.SourcePort, item.Workstation, item.Process, item.ServiceName, item.Command,
+		item.AuthPackage, item.Status, item.FailureReason, item.TargetSID, item.Provider,
+		item.Level, item.Message, item.Details,
+	}
+}
+
+func eventSummaryExportRow(row []string) []string {
+	return eventFullRow(securitylog.Event{
+		Time: valueAt(row, 0), Category: valueAt(row, 1), Action: valueAt(row, 2),
+		EventID: valueAt(row, 3), Account: valueAt(row, 4), SourceIP: valueAt(row, 5),
+		LogonTypeName: valueAt(row, 6), Process: valueAt(row, 7), ServiceName: valueAt(row, 8),
+		Command: valueAt(row, 9), Details: valueAt(row, 10),
+	})
+}
+
+func eventDetailText(item securitylog.Event) string {
+	fields := []struct{ label, value string }{
+		{"时间", item.Time}, {"分类", item.Category}, {"来源", item.Source}, {"Provider", item.Provider},
+		{"事件ID", item.EventID}, {"级别", item.Level}, {"动作", item.Action}, {"账户", item.Account},
+		{"域", item.Domain}, {"操作者", item.Subject}, {"目标SID", item.TargetSID},
+		{"登录类型", item.LogonType}, {"登录类型说明", item.LogonTypeName},
+		{"来源IP", item.SourceIP}, {"来源端口", item.SourcePort}, {"工作站", item.Workstation},
+		{"进程", item.Process}, {"服务", item.ServiceName}, {"认证包", item.AuthPackage},
+		{"状态", item.Status}, {"失败原因", item.FailureReason}, {"命令", item.Command},
+		{"消息", item.Message}, {"详情", item.Details},
+	}
+	lines := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if strings.TrimSpace(field.value) != "" {
+			lines = append(lines, field.label+": "+field.value)
+		}
+	}
+	return strings.Join(lines, "\r\n")
 }
 
 func limitRunes(value string, max int) string {
@@ -4073,39 +4265,55 @@ func packageFileTraceOptions(eventOpts securitylog.Options) filetrace.Options {
 	return filetrace.Options{Hours: hours, MaxRecords: maxRecords}
 }
 
-func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitBytes int64, progress func(int, string)) error {
-	file, err := os.Create(path)
+func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitBytes int64, current legacyEvidenceSnapshot, progress func(int, string)) error {
+	directory := filepath.Dir(path)
+	file, err := os.CreateTemp(directory, ".wintracelens-evidence-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-
+	tempPath := file.Name()
 	zw := zip.NewWriter(file)
-	defer zw.Close()
+	zipClosed := false
+	fileClosed := false
+	committed := false
+	defer func() {
+		if !zipClosed {
+			_ = zw.Close()
+		}
+		if !fileClosed {
+			_ = file.Close()
+		}
+		if !committed {
+			_ = os.Remove(tempPath)
+		}
+	}()
 
 	generatedAt := time.Now().Format("2006-01-02 15:04:05")
 	processes, procErr := process.Collect(process.Options{HashLimitBytes: hashLimitBytes})
-	reportEvidenceProgress(progress, 14, "取证包：进程")
+	reportEvidenceProgress(progress, 12, "取证包：进程")
+	connections, connectionErr := process.CollectConnections()
+	reportEvidenceProgress(progress, 20, "取证包：实时连接")
 	hostSnapshot, hostErr := host.Collect(host.Options{HashLimitBytes: hashLimitBytes})
-	reportEvidenceProgress(progress, 28, "取证包：主机信息")
+	reportEvidenceProgress(progress, 32, "取证包：主机信息")
 	registrySnapshot, registryErr := registryanomaly.Collect(registryanomaly.Options{MaxRecords: 500, MaxKeys: 6000, MaxValues: 30000, MaxDepth: 5, MaxDataSize: 4 * 1024 * 1024, Timeout: 12 * time.Second})
 	if registryErr == nil {
 		registrySnapshot = registryanomaly.Correlate(registrySnapshot, processes, hostSnapshot)
 	}
-	reportEvidenceProgress(progress, 40, "取证包：注册表")
+	reportEvidenceProgress(progress, 44, "取证包：注册表")
 	securitySnapshot, eventErr := securitylog.Collect(eventOpts)
-	reportEvidenceProgress(progress, 54, "取证包：事件日志")
+	reportEvidenceProgress(progress, 56, "取证包：事件日志")
 	historySnapshot, historyErr := history.Collect(history.Options{StartTime: eventOpts.StartTime, EndTime: eventOpts.EndTime, MaxRecords: eventOpts.MaxRecords})
-	reportEvidenceProgress(progress, 66, "取证包：历史通信")
+	reportEvidenceProgress(progress, 68, "取证包：历史通信")
 	fileTraceSnapshot, fileTraceErr := filetrace.Collect(packageFileTraceOptions(eventOpts))
-	reportEvidenceProgress(progress, 78, "取证包：文件痕迹")
-	connections, connectionErr := process.CollectConnections()
-	reportEvidenceProgress(progress, 84, "取证包：实时连接")
+	reportEvidenceProgress(progress, 80, "取证包：文件痕迹")
 	moduleRows, moduleErr := packageModuleRows(processes, hashLimitBytes)
 	reportEvidenceProgress(progress, 92, "取证包：模块与报告")
 	findings := analysis.BuildFindings(processes, hostSnapshot)
 
 	if err := writeZipText(zw, "summary.txt", evidenceSummary(generatedAt, processes, hostSnapshot, findings, registrySnapshot, securitySnapshot, historySnapshot, fileTraceSnapshot, procErr, hostErr, registryErr, eventErr, historyErr, fileTraceErr, connectionErr, moduleErr)); err != nil {
+		return err
+	}
+	if err := writeCurrentSessionEvidence(zw, current); err != nil {
 		return err
 	}
 	if procErr == nil {
@@ -4167,9 +4375,14 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 		}
 	}
 	if eventErr == nil {
-		rows := eventRows(securitySnapshot.Events)
-		rows = append(rows, eventWarningRows(securitySnapshot.GeneratedAt, securitySnapshot.CollectionErrors)...)
-		if err := writeZipCSV(zw, "security-events.csv", headersOf(eventColumns), rows); err != nil {
+		rows := make([][]string, 0, len(securitySnapshot.Events)+len(securitySnapshot.CollectionErrors))
+		for _, item := range securitySnapshot.Events {
+			rows = append(rows, eventFullRow(item))
+		}
+		for _, row := range eventWarningRows(securitySnapshot.GeneratedAt, securitySnapshot.CollectionErrors) {
+			rows = append(rows, eventSummaryExportRow(row))
+		}
+		if err := writeZipCSV(zw, "security-events.csv", eventExportHeaders, rows); err != nil {
 			return err
 		}
 	}
@@ -4223,7 +4436,69 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 		}
 	}
 	reportEvidenceProgress(progress, 98, "取证包：写入压缩包")
+	if err := zw.Close(); err != nil {
+		zipClosed = true
+		return fmt.Errorf("完成 ZIP 目录失败: %w", err)
+	}
+	zipClosed = true
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("同步取证包失败: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		fileClosed = true
+		return fmt.Errorf("关闭取证包失败: %w", err)
+	}
+	fileClosed = true
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("提交取证包失败: %w", err)
+	}
+	committed = true
+	reportEvidenceProgress(progress, 100, "取证包：完成")
 	return nil
+}
+
+func writeCurrentSessionEvidence(zw *zip.Writer, snapshot legacyEvidenceSnapshot) error {
+	type dataset struct {
+		name    string
+		headers []string
+		rows    [][]string
+	}
+	eventRows := make([][]string, 0, len(snapshot.Events)+len(snapshot.EventWarnings))
+	for _, item := range snapshot.Events {
+		eventRows = append(eventRows, eventFullRow(item))
+	}
+	for _, row := range snapshot.EventWarnings {
+		eventRows = append(eventRows, eventSummaryExportRow(row))
+	}
+	datasets := []dataset{
+		{"processes", headersOf(processColumns), snapshot.Processes},
+		{"host-all", headersOf(hostColumns), snapshot.Host},
+		{"findings", headersOf(findingColumns), snapshot.Findings},
+		{"memory-anomalies", headersOf(memoryColumns), snapshot.Memory},
+		{"driver-risks", headersOf(driverColumns), snapshot.Drivers},
+		{"security-events", eventExportHeaders, eventRows},
+		{"network-history", headersOf(historyColumns), snapshot.History},
+		{"file-traces", headersOf(fileTraceColumns), snapshot.FileTraces},
+		{"registry-anomalies", headersOf(registryColumns), snapshot.Registry},
+		{"selected-process-modules", headersOf(processModuleColumns), snapshot.SelectedModules},
+		{"selected-process-connections", headersOf(processConnectionColumns), snapshot.SelectedConnections},
+	}
+	coverage := make([][]string, 0, len(datasets))
+	for _, item := range datasets {
+		status := "本次运行未采集"
+		if len(item.rows) > 0 {
+			status = "已保留当前会话快照"
+			if err := writeZipCSV(zw, "current-session/"+item.name+".csv", item.headers, item.rows); err != nil {
+				return err
+			}
+		}
+		coverage = append(coverage, []string{item.name, status, strconv.Itoa(len(item.rows))})
+	}
+	if err := writeZipCSV(zw, "current-session/coverage.csv", []string{"数据集", "状态", "行数"}, coverage); err != nil {
+		return err
+	}
+	readme := fmt.Sprintf("WinTraceLens Legacy 当前会话快照\r\n采集时间: %s\r\n选中进程: %s (PID %d)\r\n\r\n该目录保存点击导出前界面已经持有的数据，避免进程退出或连接断开后只剩重新采集结果。ZIP 根目录中的文件属于导出时重新采集的数据。\r\n", snapshot.CapturedAt, snapshot.SelectedName, snapshot.SelectedPID)
+	return writeZipText(zw, "current-session/README.txt", readme)
 }
 
 func reportEvidenceProgress(progress func(int, string), value int, label string) {
@@ -4358,9 +4633,9 @@ func packageModuleTargets(items []process.Info, limit int) []process.Info {
 func sanitizeCSVRow(row []string) []string {
 	out := make([]string, len(row))
 	for i, value := range row {
-		value = strings.NewReplacer("\x00", " ", "\r", " ", "\n", " ").Replace(value)
-		value = strings.Join(strings.Fields(value), " ")
-		if value != "" && strings.ContainsAny(value[:1], "=+-@") {
+		value = strings.ReplaceAll(value, "\x00", " ")
+		trimmed := strings.TrimLeft(value, " \t\r\n")
+		if trimmed != "" && strings.ContainsAny(trimmed[:1], "=+-@") {
 			value = "'" + value
 		}
 		out[i] = value

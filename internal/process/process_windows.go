@@ -190,6 +190,34 @@ func Collect(opts Options) ([]Info, error) {
 	return items, nil
 }
 
+// ResolveIdentities resolves only the names and paths needed by lightweight
+// views such as the netstat snapshot. It intentionally avoids the full process
+// collector's WMI, CPU sampling, hashing and signature work.
+func ResolveIdentities(pids []uint32) (map[uint32]Identity, error) {
+	entries, err := snapshotProcesses()
+	if err != nil {
+		return nil, err
+	}
+
+	wanted := make(map[uint32]struct{}, len(pids))
+	for _, pid := range pids {
+		wanted[pid] = struct{}{}
+	}
+
+	identities := make(map[uint32]Identity, len(wanted))
+	for _, entry := range entries {
+		if _, ok := wanted[entry.ProcessID]; !ok {
+			continue
+		}
+		path, _ := queryProcessPath(entry.ProcessID)
+		identities[entry.ProcessID] = Identity{
+			Name: utf16String(entry.ExeFile[:]),
+			Path: path,
+		}
+	}
+	return identities, nil
+}
+
 func queryProcessCommandLines() map[uint32]string {
 	cmd := winexec.Command("wmic.exe", "process", "get", "ProcessId,CommandLine", "/format:csv")
 	out, err := cmd.Output()
