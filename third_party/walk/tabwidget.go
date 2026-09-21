@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
 // +build windows
 
 package walk
@@ -33,6 +34,7 @@ type TabWidget struct {
 	currentIndexChangedPublisher EventPublisher
 	nonClientSizePixels          Size
 	persistent                   bool
+	headerHidden                 bool
 }
 
 func NewTabWidget(parent Container) (*TabWidget, error) {
@@ -190,6 +192,24 @@ func (tw *TabWidget) SetPersistent(value bool) {
 	tw.persistent = value
 }
 
+// HeaderHidden returns whether the native tab header is hidden.
+func (tw *TabWidget) HeaderHidden() bool {
+	return tw.headerHidden
+}
+
+// SetHeaderHidden hides the native tab strip while keeping page selection and
+// keyboard focus behavior available to an external navigation control.
+func (tw *TabWidget) SetHeaderHidden(hidden bool) {
+	if tw.headerHidden == hidden {
+		return
+	}
+	tw.headerHidden = hidden
+	setWindowVisible(tw.hWndTab, !hidden)
+	tw.resizePages()
+	tw.RequestLayout()
+	_ = tw.Invalidate()
+}
+
 func (tw *TabWidget) SaveState() error {
 	tw.WriteState(strconv.Itoa(tw.CurrentIndex()))
 
@@ -240,6 +260,9 @@ func (tw *TabWidget) resizePages() {
 
 // pageBounds returns page bounds in native pixels.
 func (tw *TabWidget) pageBounds() Rectangle {
+	if tw.headerHidden {
+		return windowClientBounds(tw.hWnd)
+	}
 	var r win.RECT
 	if !win.GetWindowRect(tw.hWndTab, &r) {
 		lastError("GetWindowRect")
@@ -704,6 +727,7 @@ func (tw *TabWidget) CreateLayoutItem(ctx *LayoutContext) LayoutItem {
 		pagePos:             bounds.Location(),
 		currentIndex:        tw.CurrentIndex(),
 		nonClientSizePixels: tw.nonClientSizePixels,
+		headerHidden:        tw.headerHidden,
 	}
 
 	for i := tw.pages.Len() - 1; i >= 0; i-- {
@@ -730,16 +754,25 @@ type tabWidgetLayoutItem struct {
 	nonClientSizePixels Size
 	pagePos             Point // in native pixels
 	currentIndex        int
+	headerHidden        bool
+}
+
+func (li *tabWidgetLayoutItem) measuredPages() []LayoutItem {
+	if li.headerHidden && li.currentIndex >= 0 && li.currentIndex < len(li.children) {
+		return li.children[li.currentIndex : li.currentIndex+1]
+	}
+	return li.children
 }
 
 func (li *tabWidgetLayoutItem) LayoutFlags() LayoutFlags {
-	if len(li.children) == 0 {
+	pages := li.measuredPages()
+	if len(pages) == 0 {
 		return ShrinkableHorz | ShrinkableVert | GrowableHorz | GrowableVert | GreedyHorz | GreedyVert
 	}
 
 	var flags LayoutFlags
 
-	for _, page := range li.children {
+	for _, page := range pages {
 		flags |= page.LayoutFlags()
 	}
 
@@ -747,13 +780,14 @@ func (li *tabWidgetLayoutItem) LayoutFlags() LayoutFlags {
 }
 
 func (li *tabWidgetLayoutItem) MinSize() Size {
-	if len(li.children) == 0 {
+	pages := li.measuredPages()
+	if len(pages) == 0 {
 		return Size{}
 	}
 
 	var min Size
 
-	for _, page := range li.children {
+	for _, page := range pages {
 		if ms, ok := page.(MinSizer); ok {
 			s := ms.MinSize()
 
@@ -770,11 +804,12 @@ func (li *tabWidgetLayoutItem) MinSizeForSize(size Size) Size {
 }
 
 func (li *tabWidgetLayoutItem) HasHeightForWidth() bool {
-	if len(li.children) == 0 {
+	pages := li.measuredPages()
+	if len(pages) == 0 {
 		return false
 	}
 
-	for _, page := range li.children {
+	for _, page := range pages {
 		if hfw, ok := page.(HeightForWidther); ok && hfw.HasHeightForWidth() {
 			return true
 		}
@@ -784,7 +819,8 @@ func (li *tabWidgetLayoutItem) HasHeightForWidth() bool {
 }
 
 func (li *tabWidgetLayoutItem) HeightForWidth(width int) int {
-	if len(li.children) == 0 {
+	pages := li.measuredPages()
+	if len(pages) == 0 {
 		return 0
 	}
 
@@ -795,7 +831,7 @@ func (li *tabWidgetLayoutItem) HeightForWidth(width int) int {
 	margin.Width -= pageSize.Width
 	margin.Height -= pageSize.Height
 
-	for _, page := range li.children {
+	for _, page := range pages {
 		if hfw, ok := page.(HeightForWidther); ok && hfw.HasHeightForWidth() {
 			h := hfw.HeightForWidth(width + margin.Width)
 

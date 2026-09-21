@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
 // +build windows
 
 package walk
@@ -37,6 +38,8 @@ type CustomWidget struct {
 	paintPixels         PaintFunc // in native pixels
 	invalidatesOnResize bool
 	paintMode           PaintMode
+	trackingMouseLeave  bool
+	mouseLeavePublisher EventPublisher
 }
 
 // NewCustomWidget creates and initializes a new custom draw widget.
@@ -110,8 +113,27 @@ func (cw *CustomWidget) SetPaintMode(value PaintMode) {
 	cw.paintMode = value
 }
 
+// MouseLeave returns an event that is published when the pointer leaves the widget.
+func (cw *CustomWidget) MouseLeave() *Event {
+	return cw.mouseLeavePublisher.Event()
+}
+
 func (cw *CustomWidget) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
+	case win.WM_MOUSEMOVE:
+		if !cw.trackingMouseLeave {
+			tme := win.TRACKMOUSEEVENT{
+				CbSize:    uint32(unsafe.Sizeof(win.TRACKMOUSEEVENT{})),
+				DwFlags:   win.TME_LEAVE,
+				HwndTrack: cw.hWnd,
+			}
+			cw.trackingMouseLeave = win.TrackMouseEvent(&tme)
+		}
+
+	case win.WM_MOUSELEAVE:
+		cw.trackingMouseLeave = false
+		cw.mouseLeavePublisher.Publish()
+
 	case win.WM_PAINT:
 		if cw.paint == nil && cw.paintPixels == nil {
 			newError("paint(Pixels) func is nil")
@@ -235,5 +257,21 @@ func (cw *CustomWidget) bufferedPaint(canvas *Canvas, updateBounds Rectangle) er
 }
 
 func (*CustomWidget) CreateLayoutItem(ctx *LayoutContext) LayoutItem {
-	return NewGreedyLayoutItem()
+	return new(customWidgetLayoutItem)
+}
+
+type customWidgetLayoutItem struct {
+	LayoutItemBase
+}
+
+func (*customWidgetLayoutItem) LayoutFlags() LayoutFlags {
+	return ShrinkableHorz | GrowableHorz | GreedyHorz | ShrinkableVert | GrowableVert
+}
+
+func (li *customWidgetLayoutItem) IdealSize() Size {
+	return SizeFrom96DPI(Size{100, 50}, li.ctx.dpi)
+}
+
+func (*customWidgetLayoutItem) MinSize() Size {
+	return Size{}
 }

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
 // +build windows
 
 package walk
@@ -44,8 +45,8 @@ const (
 
 type TableViewCfg struct {
 	Style              uint32
-	CustomHeaderHeight int // in native pixels?
-	CustomRowHeight    int // in native pixels?
+	CustomHeaderHeight int // in 1/96 inch units
+	CustomRowHeight    int // in 1/96 inch units
 }
 
 // TableView is a model based widget for record centric, tabular data.
@@ -73,6 +74,7 @@ type TableView struct {
 	itemFont                           *Font
 	hIml                               win.HIMAGELIST
 	usingSysIml                        bool
+	rowHeightImageList                 bool
 	imageUintptr2Index                 map[uintptr]int32
 	filePath2IconIndex                 map[string]int32
 	rowsResetHandlerHandle             int
@@ -112,8 +114,10 @@ type TableView struct {
 	sortedColumnIndex                  int
 	sortOrder                          SortOrder
 	formActivatingHandle               int
-	customHeaderHeight                 int // in native pixels?
-	customRowHeight                    int // in native pixels?
+	customHeaderHeight                 int // in native pixels
+	customRowHeight                    int // in native pixels
+	customHeaderHeight96DPI            int
+	customRowHeight96DPI               int
 	dpiOfPrevStretchLastColumn         int
 	scrolling                          bool
 	inSetCurrentIndex                  bool
@@ -148,8 +152,8 @@ func NewTableViewWithCfg(parent Container, cfg *TableViewCfg) (*TableView, error
 		imageUintptr2Index:          make(map[uintptr]int32),
 		filePath2IconIndex:          make(map[string]int32),
 		formActivatingHandle:        -1,
-		customHeaderHeight:          cfg.CustomHeaderHeight,
-		customRowHeight:             cfg.CustomRowHeight,
+		customHeaderHeight96DPI:     cfg.CustomHeaderHeight,
+		customRowHeight96DPI:        cfg.CustomRowHeight,
 		scrollbarOrientation:        Horizontal | Vertical,
 		restoringCurrentItemOnReset: true,
 	}
@@ -164,6 +168,7 @@ func NewTableViewWithCfg(parent Container, cfg *TableViewCfg) (*TableView, error
 		win.WS_EX_CONTROLPARENT); err != nil {
 		return nil, err
 	}
+	tv.updateCustomHeights(tv.DPI())
 
 	succeeded := false
 	defer func() {
@@ -172,16 +177,11 @@ func NewTableViewWithCfg(parent Container, cfg *TableViewCfg) (*TableView, error
 		}
 	}()
 
-	var rowHeightStyle uint32
-	if cfg.CustomRowHeight > 0 {
-		rowHeightStyle = win.LVS_OWNERDRAWFIXED
-	}
-
 	if tv.hwndFrozenLV = win.CreateWindowEx(
 		0,
 		syscall.StringToUTF16Ptr("SysListView32"),
 		nil,
-		win.WS_CHILD|win.WS_CLIPSIBLINGS|win.WS_TABSTOP|win.WS_VISIBLE|win.LVS_OWNERDATA|win.LVS_REPORT|cfg.Style|rowHeightStyle,
+		win.WS_CHILD|win.WS_CLIPSIBLINGS|win.WS_TABSTOP|win.WS_VISIBLE|win.LVS_OWNERDATA|win.LVS_REPORT|cfg.Style,
 		win.CW_USEDEFAULT,
 		win.CW_USEDEFAULT,
 		win.CW_USEDEFAULT,
@@ -209,7 +209,7 @@ func NewTableViewWithCfg(parent Container, cfg *TableViewCfg) (*TableView, error
 		0,
 		syscall.StringToUTF16Ptr("SysListView32"),
 		nil,
-		win.WS_CHILD|win.WS_CLIPSIBLINGS|win.WS_TABSTOP|win.WS_VISIBLE|win.LVS_OWNERDATA|win.LVS_REPORT|cfg.Style|rowHeightStyle,
+		win.WS_CHILD|win.WS_CLIPSIBLINGS|win.WS_TABSTOP|win.WS_VISIBLE|win.LVS_OWNERDATA|win.LVS_REPORT|cfg.Style,
 		win.CW_USEDEFAULT,
 		win.CW_USEDEFAULT,
 		win.CW_USEDEFAULT,
@@ -254,6 +254,7 @@ func NewTableViewWithCfg(parent Container, cfg *TableViewCfg) (*TableView, error
 	tv.group.toolTip.addTool(tv.hwndNormalHdr, false)
 
 	tv.applyFont(parent.Font())
+	tv.remeasureCustomRows()
 
 	tv.style.dpi = tv.DPI()
 	tv.ApplySysColors()
@@ -379,16 +380,12 @@ func (tv *TableView) applyEnabled(enabled bool) {
 }
 
 func (tv *TableView) applyFont(font *Font) {
-	if tv.customHeaderHeight > 0 || tv.customRowHeight > 0 {
-		return
-	}
-
 	tv.WidgetBase.applyFont(font)
 
 	hFont := uintptr(font.handleForDPI(tv.DPI()))
 
-	win.SendMessage(tv.hwndFrozenLV, win.WM_SETFONT, hFont, 0)
-	win.SendMessage(tv.hwndNormalLV, win.WM_SETFONT, hFont, 0)
+	win.SendMessage(tv.hwndFrozenLV, win.WM_SETFONT, hFont, 1)
+	win.SendMessage(tv.hwndNormalLV, win.WM_SETFONT, hFont, 1)
 }
 
 func (tv *TableView) ApplyDPI(dpi int) {
@@ -398,19 +395,59 @@ func (tv *TableView) ApplyDPI(dpi int) {
 	}
 
 	tv.WidgetBase.ApplyDPI(dpi)
+	tv.updateCustomHeights(dpi)
 
 	for _, column := range tv.columns.items {
 		column.update()
 	}
 
-	if tv.hIml != 0 {
-		tv.disposeImageListAndCaches()
+	tv.remeasureCustomRows()
+}
 
-		if bmp, err := NewBitmapForDPI(SizeFrom96DPI(Size{16, 16}, dpi), dpi); err == nil {
-			tv.applyImageListForImage(bmp)
-			bmp.Dispose()
+func (tv *TableView) updateCustomHeights(dpi int) {
+	tv.customHeaderHeight = IntFrom96DPI(tv.customHeaderHeight96DPI, dpi)
+	tv.customRowHeight = IntFrom96DPI(tv.customRowHeight96DPI, dpi)
+}
+
+func (tv *TableView) remeasureCustomRows() {
+	if tv.hwndFrozenLV == 0 || tv.hwndNormalLV == 0 {
+		return
+	}
+
+	// LVS_OWNERDRAWFIXED is not a row-height-only switch: while it is set the
+	// application must paint every item. Toggling it at runtime can therefore
+	// leave a virtual list showing row backgrounds without any text. A small
+	// image list controls report-view row height while preserving native item
+	// painting on both old and current versions of Windows.
+	if tv.rowHeightImageList || (tv.customRowHeight > 0 && tv.hIml != 0) {
+		tv.disposeImageListAndCaches()
+	}
+	if tv.customRowHeight > 0 && tv.hIml == 0 {
+		iconWidth := IntFrom96DPI(16, tv.DPI())
+		if iconWidth < 1 {
+			iconWidth = 1
+		}
+		hIml := win.ImageList_Create(
+			int32(iconWidth),
+			int32(tv.customRowHeight),
+			win.ILC_MASK|win.ILC_COLOR32,
+			1,
+			1)
+		if hIml != 0 {
+			tv.hIml = hIml
+			tv.usingSysIml = false
+			tv.rowHeightImageList = true
+			tv.applyImageList()
+			tv.imageUintptr2Index = make(map[uintptr]int32)
+			tv.filePath2IconIndex = make(map[string]int32)
 		}
 	}
+
+	hFont := uintptr(tv.Font().handleForDPI(tv.DPI()))
+	win.SendMessage(tv.hwndFrozenLV, win.WM_SETFONT, hFont, 1)
+	win.SendMessage(tv.hwndNormalLV, win.WM_SETFONT, hFont, 1)
+	tv.updateLVSizes()
+	_ = tv.Invalidate()
 }
 
 func (tv *TableView) ApplySysColors() {
@@ -615,6 +652,30 @@ func (tv *TableView) SetGridlines(enabled bool) {
 	}
 	win.SendMessage(tv.hwndFrozenLV, win.LVM_SETEXTENDEDLISTVIEWSTYLE, 0, exStyle)
 	win.SendMessage(tv.hwndNormalLV, win.LVM_SETEXTENDEDLISTVIEWSTYLE, 0, exStyle)
+}
+
+// CustomHeights returns the configured header and row heights in 1/96 inch units.
+func (tv *TableView) CustomHeights() (headerHeight, rowHeight int) {
+	return tv.customHeaderHeight96DPI, tv.customRowHeight96DPI
+}
+
+// SetCustomHeights changes header and row heights without replacing the model.
+// Values are specified in 1/96 inch units and scaled for the current DPI.
+func (tv *TableView) SetCustomHeights(headerHeight, rowHeight int) {
+	if headerHeight < 0 {
+		headerHeight = 0
+	}
+	if rowHeight < 0 {
+		rowHeight = 0
+	}
+	if tv.customHeaderHeight96DPI == headerHeight && tv.customRowHeight96DPI == rowHeight {
+		return
+	}
+	tv.customHeaderHeight96DPI = headerHeight
+	tv.customRowHeight96DPI = rowHeight
+	tv.updateCustomHeights(tv.DPI())
+	tv.remeasureCustomRows()
+	tv.RequestLayout()
 }
 
 // Columns returns the list of columns.
@@ -895,6 +956,7 @@ func (tv *TableView) SetModel(mdl interface{}) error {
 	tv.SetCurrentIndex(-1)
 
 	tv.setItemCount()
+	tv.remeasureCustomRows()
 
 	tv.itemCountChangedPublisher.Publish()
 
@@ -1873,6 +1935,7 @@ func (tv *TableView) disposeImageListAndCaches() {
 		win.ImageList_Destroy(tv.hIml)
 	}
 	tv.hIml = 0
+	tv.rowHeightImageList = false
 
 	tv.imageUintptr2Index = nil
 	tv.filePath2IconIndex = nil
@@ -2661,13 +2724,6 @@ func (tv *TableView) WndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr 
 		case tableViewSelectedIndexesChangedTimerId:
 			tv.selectedIndexesChangedPublisher.Publish()
 		}
-
-	case win.WM_MEASUREITEM:
-		mis := (*win.MEASUREITEMSTRUCT)(unsafe.Pointer(lp))
-		mis.ItemHeight = uint32(tv.customRowHeight)
-
-		ensureWindowLongBits(tv.hwndFrozenLV, win.GWL_STYLE, win.LVS_OWNERDRAWFIXED, false)
-		ensureWindowLongBits(tv.hwndNormalLV, win.GWL_STYLE, win.LVS_OWNERDRAWFIXED, false)
 
 	case win.WM_SETFOCUS:
 		win.SetFocus(tv.hwndFrozenLV)

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
 // +build windows
 
 package declarative
@@ -51,6 +52,7 @@ type TabWidget struct {
 	AssignTo              **walk.TabWidget
 	ContentMargins        Margins
 	ContentMarginsZero    bool
+	HeaderHidden          bool
 	OnCurrentIndexChanged walk.EventHandler
 	Pages                 []TabPage
 }
@@ -88,6 +90,8 @@ func (tw TabWidget) Create(builder *Builder) error {
 		if tw.OnCurrentIndexChanged != nil {
 			w.CurrentIndexChanged().Attach(tw.OnCurrentIndexChanged)
 		}
+
+		w.SetHeaderHidden(tw.HeaderHidden)
 
 		return nil
 	})

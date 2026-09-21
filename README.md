@@ -2,6 +2,22 @@
 
 WinTraceLens Legacy 是面向 Windows 7、Windows Server 2012 / 2012 R2 等旧版 Windows 系统的应急响应辅助工具。它使用 Go 1.20.x 构建，采用 Windows 原生 GUI 控件，不依赖 WebView2 或浏览器运行环境，适合在老旧服务器、隔离环境和现场排查场景中快速运行。
 
+## UI 候选版构建
+
+浅色原生 UI 保留横向 8 个功能页和现有采集、筛选、导出逻辑，包含 Common Controls v6 manifest、System DPI Aware 声明、应用图标、紧凑应用栏、统一表格状态样式以及可折叠的进程详情区域。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-legacy-ui-preview.ps1
+```
+
+脚本固定使用 Go 1.20.14，并固定资源工具 `github.com/akavel/rsrc@v0.10.2`。候选程序输出到 `dist\WinTraceLens-legacy-ui-preview.exe`；经典版可另存为 `dist\classic-1.1.1\WinTraceLens-legacy-1.1.1-classic.exe`。
+
+确认候选界面后，可用同一脚本生成正式版本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-legacy-ui-preview.ps1 -Output "dist\WinTraceLens-legacy.exe" -Version "1.2.0-legacy"
+```
+
 该版本用于帮助分析人员在应急响应初期快速建立主机视图，定位异常进程、异常持久化、可疑登录、RDP 行为、PowerShell 痕迹、服务创建、用户创建、历史通信证据和可疑文件活动。它不是 EDR，也不替代完整取证平台，但可以作为现场快速排查和留痕导出的基础工具。
 
 ## 功能范围
@@ -11,7 +27,7 @@ WinTraceLens Legacy 是面向 Windows 7、Windows Server 2012 / 2012 R2 等旧�
 - 主机信息：采集服务、计划任务、启动项、本地用户、镜像劫持和常见持久化项；默认列表突出状态、签名、路径和命令，完整字段按需查看。
 - 关注项：基于进程、签名、路径、服务和启动项生成需要优先核查的条目，综合风险、内存异常和驱动风险均支持排序与详情查看。
 - 事件日志：支持登录成功、登录失败 4625、RDP、服务创建、用户创建、PowerShell 等常见 Windows 事件分类查看。
-- 历史通信：汇总 Sysmon、DNS Client、WFP、防火墙日志、DNS 缓存、ARP、路由和 netstat 快照等通信证据。
+- 历史通信：分开展示连接历史、DNS 记录、当前连接、短连接监测和全部证据。当前连接仅在进入页面或手动刷新时采集一次；后台每秒采样 Windows TCP 表，短连接监测页面每两秒显示一次最新结果，保留已消失的连接及 `SYN-SENT` 状态。
 - 文件痕迹：查看最近修改文件、最近运行文件和 Temp 目录可疑文件，支持指定扫描目录。
 - 注册表异常：使用 Go 原生注册表 API 受限扫描传统持久化位置及已加载用户 `Software` 区域，综合数据体积、熵、PE/命令特征、异常路径和证据关联进行评分；支持导出选中值及 JSON 元数据。
 - AI 分析：支持用户自行填写 OpenAI、DeepSeek、Kimi、Qwen 或自定义接口的 API Key，把当前采集结果提交给在线模型辅助分析。
@@ -41,6 +57,7 @@ WinTraceLens Legacy 是面向 Windows 7、Windows Server 2012 / 2012 R2 等旧�
 ## 兼容性说明
 
 - Windows 旧系统默认可能没有 Sysmon，也可能没有启用 WFP 连接审计和防火墙日志，因此历史通信不一定能还原完整通信历史。
+- 短连接监测从程序启动后开始、只保存在本次运行内存中，取证包会将其另存为 CSV。它能发现持续时间达到采样窗口的连接，但不能替代 WFP、ETW、Sysmon 或抓包工具；持续时间短于约一秒的报文仍可能漏采。
 - DNS 缓存通常没有可靠的时间和进程归属，只能作为域名访问线索，不能单独作为进程归因证据。
 - 事件日志是否完整取决于系统审计策略、日志保留时间和当前用户权限。
 - AI 分析需要用户自行填写 API Key。程序不内置第三方 API Key，也不应把 API Key 提交到源码仓库。

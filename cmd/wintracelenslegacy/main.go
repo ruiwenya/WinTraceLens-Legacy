@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -39,7 +40,7 @@ import (
 	"github.com/ruiwenya/WinTraceLens/internal/threatanalysis"
 )
 
-var version = "1.1.1-legacy"
+var version = "1.2.0-legacy"
 
 var shellExecuteW = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
 
@@ -240,6 +241,60 @@ var historyColumns = []tableColumn{
 	{"详情", 420},
 }
 
+var historyConnectionColumns = []tableColumn{
+	{"时间", 150},
+	{"来源", 145},
+	{"进程 / PID", 190},
+	{"本地地址", 190},
+	{"远程地址", 205},
+	{"协议 / 动作", 130},
+	{"详情", -420},
+}
+
+var historyDNSColumns = []tableColumn{
+	{"来源", 150},
+	{"DNS 查询", 300},
+	{"解析结果 / 详情", 520},
+	{"时间", -150},
+	{"进程", -260},
+	{"PID", -80},
+}
+
+var historyLiveColumns = []tableColumn{
+	{"采集时间", 150},
+	{"来源", 105},
+	{"进程 / PID", 190},
+	{"协议 / 状态", 140},
+	{"本地地址", 190},
+	{"远程地址", 205},
+	{"远程类型", 105},
+	{"路径", -420},
+}
+
+var historyMonitorColumns = []tableColumn{
+	{"首次发现", 150},
+	{"最后发现", 150},
+	{"进程 / PID", 190},
+	{"协议 / 状态", 140},
+	{"本地地址", 190},
+	{"远程地址", 205},
+	{"出现 / 采样", 95},
+	{"当前", 60},
+	{"路径", -420},
+	{"远程类型", -105},
+}
+
+var historyAllColumns = []tableColumn{
+	{"时间", 150},
+	{"来源", 145},
+	{"进程 / PID", 190},
+	{"通信目标", 220},
+	{"协议 / 状态", 145},
+	{"详情", 420},
+	{"本地地址", -200},
+	{"路径", -420},
+}
+
 var fileTraceColumns = []tableColumn{
 	{"分类", 120},
 	{"来源", 130},
@@ -259,13 +314,13 @@ var fileTraceColumns = []tableColumn{
 }
 
 var hostColumns = []tableColumn{
-	{"类型", 90},
-	{"名称", 220},
-	{"状态/属性", 220},
+	{"类型", 72},
+	{"名称", 180},
+	{"状态/属性", 170},
 	{"账户/作者/SID", -320},
 	{"MD5", -250},
-	{"签名", 120},
-	{"路径", 420},
+	{"签名", 105},
+	{"路径", 300},
 	{"命令/详情", 420},
 	{"位置/注册表", -380},
 	{"错误", -240},
@@ -376,39 +431,61 @@ func (m *tableModel) Headers() []string {
 }
 
 type legacyApp struct {
-	mw             *walk.MainWindow
-	mainTabs       *walk.TabWidget
-	status         *walk.Label
-	progressText   *walk.Label
-	progressBar    *walk.ProgressBar
-	progressTasks  map[string]progressTask
-	progressSeq    uint64
-	hashLimitBytes int64
-	processStarted bool
-	hostStarted    bool
-	findingStarted bool
-	eventStarted   bool
+	mw               *walk.MainWindow
+	mainTabs         *walk.TabWidget
+	mainNav          *navigationBar
+	status           *walk.Label
+	progressText     *walk.Label
+	progressBar      *walk.ProgressBar
+	progressHost     *walk.Composite
+	densityToggle    *walk.PushButton
+	progressTasks    map[string]progressTask
+	progressSeq      uint64
+	hashLimitBytes   int64
+	forceSystemFrame bool
+	windowFrameMode  string
+	compactTables    bool
+	startCompact     bool
+	processStarted   bool
+	hostStarted      bool
+	findingStarted   bool
+	eventStarted     bool
 
-	processSearch  *walk.LineEdit
-	processModel   *tableModel
-	processView    *walk.TableView
-	processRows    [][]string
-	processItems   []process.Info
-	processSummary *walk.Label
-	processDetail  *walk.Label
-	moduleModel    *tableModel
-	moduleView     *walk.TableView
-	moduleRows     [][]string
-	connModel      *tableModel
-	connView       *walk.TableView
-	connRows       [][]string
-	selectedPID    uint32
-	selectedName   string
-	hasSelection   bool
-	detailSeq      int
+	processSearch        *walk.LineEdit
+	processModel         *tableModel
+	processView          *walk.TableView
+	processSplitter      *walk.Splitter
+	processDetailPane    *walk.Composite
+	processDetailToggle  *walk.PushButton
+	processDetailTabs    *walk.TabWidget
+	processDetailNav     *navigationBar
+	processInfoIdentity  *walk.LineEdit
+	processInfoParent    *walk.LineEdit
+	processInfoResources *walk.LineEdit
+	processInfoSignature *walk.LineEdit
+	processInfoCreated   *walk.LineEdit
+	processInfoMD5       *walk.LineEdit
+	processInfoPath      *walk.LineEdit
+	processInfoCommand   *walk.LineEdit
+	uiReady              bool
+	processRows          [][]string
+	processItems         []process.Info
+	processSummary       *walk.Label
+	processDetail        *walk.Label
+	moduleModel          *tableModel
+	moduleView           *walk.TableView
+	moduleRows           [][]string
+	connModel            *tableModel
+	connView             *walk.TableView
+	connRows             [][]string
+	selectedPID          uint32
+	selectedName         string
+	hasSelection         bool
+	detailSeq            int
 
 	hostSearch          *walk.LineEdit
 	hostSummary         *walk.Label
+	hostNav             *navigationBar
 	hostModel           *tableModel
 	hostView            *walk.TableView
 	hostKind            string
@@ -442,6 +519,7 @@ type legacyApp struct {
 	findingSearch  *walk.LineEdit
 	findingSummary *walk.Label
 	findingTabs    *walk.TabWidget
+	findingNav     *navigationBar
 	findingModel   *tableModel
 	findingView    *walk.TableView
 	findingRows    [][]string
@@ -463,17 +541,38 @@ type legacyApp struct {
 	eventItems    []securitylog.Event
 	eventWarnings [][]string
 	eventCategory string
+	eventNav      *navigationBar
 
-	historyStarted  bool
-	historySearch   *walk.LineEdit
-	historySummary  *walk.Label
-	historyStart    *walk.LineEdit
-	historyEnd      *walk.LineEdit
-	historyMax      *walk.LineEdit
-	historyModel    *tableModel
-	historyView     *walk.TableView
-	historyRows     [][]string
-	historyWarnings [][]string
+	historyStarted            bool
+	historySearch             *walk.LineEdit
+	historySummary            *walk.Label
+	historyStart              *walk.LineEdit
+	historyEnd                *walk.LineEdit
+	historyMax                *walk.LineEdit
+	historyTabs               *walk.TabWidget
+	historyNav                *navigationBar
+	historyConnectionModel    *tableModel
+	historyConnectionView     *walk.TableView
+	historyConnectionRows     [][]string
+	historyDNSModel           *tableModel
+	historyDNSView            *walk.TableView
+	historyDNSRows            [][]string
+	historyLiveModel          *tableModel
+	historyLiveView           *walk.TableView
+	historyLiveRows           [][]string
+	historyMonitorModel       *tableModel
+	historyMonitorView        *walk.TableView
+	historyMonitorRows        [][]string
+	historyAllModel           *tableModel
+	historyAllView            *walk.TableView
+	historyAllRows            [][]string
+	historyItems              []history.Record
+	historyCollectionWarnings []string
+	historyRows               [][]string
+	historyWarnings           [][]string
+	connectionMonitor         *history.ConnectionMonitor
+	historyMonitorStop        chan struct{}
+	historyMonitorStopOnce    sync.Once
 
 	fileTraceStarted  bool
 	fileTraceSearch   *walk.LineEdit
@@ -520,6 +619,8 @@ func main() {
 	runtime.LockOSThread()
 
 	hashLimitMB := flag.Int64("hash-limit-mb", 512, "skip MD5 hashing for executable files larger than this size")
+	systemFrame := flag.Bool("system-frame", false, "use the standard Windows frame without caption color integration")
+	compactMode := flag.Bool("compact", false, "start with compact table density")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -528,59 +629,78 @@ func main() {
 		return
 	}
 
-	app := newLegacyApp(*hashLimitMB * 1024 * 1024)
+	app := newLegacyApp(*hashLimitMB*1024*1024, *systemFrame, *compactMode)
 	if err := app.run(); err != nil {
 		walk.MsgBox(nil, "WinTraceLens Legacy 启动失败", err.Error(), walk.MsgBoxIconError)
 	}
 }
 
-func newLegacyApp(hashLimitBytes int64) *legacyApp {
+func newLegacyApp(hashLimitBytes int64, forceSystemFrame, startCompact bool) *legacyApp {
 	return &legacyApp{
-		hashLimitBytes:   hashLimitBytes,
-		progressTasks:    make(map[string]progressTask),
-		processModel:     newTableModel(processColumns),
-		moduleModel:      newTableModel(processModuleColumns),
-		connModel:        newTableModel(processConnectionColumns),
-		hostModel:        newTableModel(hostColumns),
-		hostKind:         "services",
-		serviceModel:     newTableModel(serviceColumns),
-		taskModel:        newTableModel(taskColumns),
-		startupModel:     newTableModel(startupColumns),
-		userModel:        newTableModel(userColumns),
-		ifeoModel:        newTableModel(ifeoColumns),
-		persistenceModel: newTableModel(persistenceColumns),
-		findingModel:     newTableModel(findingColumns),
-		memoryModel:      newTableModel(memoryColumns),
-		driverModel:      newTableModel(driverColumns),
-		eventModel:       newTableModel(eventColumns),
-		eventCategory:    "all",
-		historyModel:     newTableModel(historyColumns),
-		fileTraceModel:   newTableModel(fileTraceColumns),
-		registryModel:    newTableModel(registryColumns),
+		hashLimitBytes:         hashLimitBytes,
+		forceSystemFrame:       forceSystemFrame,
+		startCompact:           startCompact,
+		progressTasks:          make(map[string]progressTask),
+		processModel:           newTableModel(processColumns),
+		moduleModel:            newTableModel(processModuleColumns),
+		connModel:              newTableModel(processConnectionColumns),
+		hostModel:              newTableModel(hostColumns),
+		hostKind:               "services",
+		serviceModel:           newTableModel(serviceColumns),
+		taskModel:              newTableModel(taskColumns),
+		startupModel:           newTableModel(startupColumns),
+		userModel:              newTableModel(userColumns),
+		ifeoModel:              newTableModel(ifeoColumns),
+		persistenceModel:       newTableModel(persistenceColumns),
+		findingModel:           newTableModel(findingColumns),
+		memoryModel:            newTableModel(memoryColumns),
+		driverModel:            newTableModel(driverColumns),
+		eventModel:             newTableModel(eventColumns),
+		eventCategory:          "all",
+		historyConnectionModel: newTableModel(historyConnectionColumns),
+		historyDNSModel:        newTableModel(historyDNSColumns),
+		historyLiveModel:       newTableModel(historyLiveColumns),
+		historyMonitorModel:    newTableModel(historyMonitorColumns),
+		historyAllModel:        newTableModel(historyAllColumns),
+		connectionMonitor:      history.NewConnectionMonitor(history.DefaultConnectionMonitorInterval, history.DefaultConnectionMonitorCapacity),
+		historyMonitorStop:     make(chan struct{}),
+		fileTraceModel:         newTableModel(fileTraceColumns),
+		registryModel:          newTableModel(registryColumns),
 	}
 }
 
 func (a *legacyApp) run() error {
 	mainWindow := MainWindow{
-		AssignTo: &a.mw,
-		Title:    "WinTraceLens Legacy",
-		Bounds:   defaultDeclarativeBounds(),
-		MinSize:  Size{Width: 760, Height: 500},
-		Font:     Font{Family: "Microsoft YaHei UI", PointSize: 9},
-		Background: SolidColorBrush{
-			Color: walk.RGB(240, 243, 247),
-		},
-		Layout: VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 8}, Spacing: 8},
+		AssignTo:        &a.mw,
+		Title:           "WinTraceLens Legacy",
+		Icon:            "2",
+		Bounds:          defaultDeclarativeBounds(),
+		MinSize:         Size{Width: 760, Height: 500},
+		Font:            Font{Family: "Microsoft YaHei UI", PointSize: 10},
+		Background:      legacyBrush(legacyLight.Chrome),
+		OnBoundsChanged: a.onMainWindowBoundsChanged,
+		Layout:          VBox{MarginsZero: true, SpacingZero: true},
 		Children: []Widget{
 			a.header(),
 			a.contentArea(),
 			Composite{
-				Background: SolidColorBrush{Color: walk.RGB(235, 241, 248)},
-				Layout:     HBox{Margins: Margins{Left: 10, Top: 6, Right: 10, Bottom: 6}, Spacing: 8},
+				Background: legacyBrush(legacyLight.Chrome),
+				MinSize:    Size{Height: 30},
+				MaxSize:    Size{Height: 30},
+				Layout:     HBox{Margins: Margins{Left: 12, Top: 4, Right: 12, Bottom: 4}, Spacing: 8},
 				Children: []Widget{
-					Label{AssignTo: &a.status, Text: "就绪。建议以管理员权限运行，以获得完整事件日志和系统信息。", TextColor: walk.RGB(50, 67, 89), StretchFactor: 1},
-					Label{AssignTo: &a.progressText, Text: "采集进度：就绪", TextColor: walk.RGB(50, 67, 89), MinSize: Size{Width: 126}},
-					ProgressBar{AssignTo: &a.progressBar, MinValue: 0, MaxValue: 100, Value: 0, MinSize: Size{Width: 150}, MaxSize: Size{Width: 210}},
+					Label{AssignTo: &a.status, Text: "就绪。建议以管理员权限运行，以获得完整事件日志和系统信息。", TextColor: legacyLight.Text, StretchFactor: 1},
+					Label{AssignTo: &a.progressText, Text: "采集进度：就绪", TextColor: legacyLight.MutedText, MinSize: Size{Width: 126}},
+					Composite{
+						AssignTo:   &a.progressHost,
+						MinSize:    Size{Width: 180},
+						MaxSize:    Size{Width: 180},
+						Background: legacyBrush(legacyLight.Chrome),
+						Layout:     HBox{MarginsZero: true},
+						Children: []Widget{
+							ProgressBar{AssignTo: &a.progressBar, MinValue: 0, MaxValue: 100, Value: 0, Visible: false, StretchFactor: 1},
+						},
+					},
 				},
 			},
 		},
@@ -589,13 +709,30 @@ func (a *legacyApp) run() error {
 	if err := mainWindow.Create(); err != nil {
 		return err
 	}
+	a.mw.Closing().Attach(func(_ *bool, _ walk.CloseReason) {
+		a.stopHistoryMonitorRefreshLoop()
+	})
+	a.windowFrameMode = a.applyWindowFrame()
 	a.configureComboDropDowns()
+	a.applyTableVisuals()
+	a.setTableDensity(a.startCompact)
+	a.configureNavigationBars()
+	a.uiReady = true
+	a.onMainWindowBoundsChanged()
 
 	a.mw.Starting().Once(func() {
+		if a.connectionMonitor != nil {
+			a.connectionMonitor.Start()
+		}
+		a.startHistoryMonitorRefreshLoop()
 		a.refreshProcesses()
 		a.refreshFileTrace()
 	})
 	returnCode := a.mw.Run()
+	a.stopHistoryMonitorRefreshLoop()
+	if a.connectionMonitor != nil {
+		a.connectionMonitor.Stop()
+	}
 	if returnCode != 0 {
 		return fmt.Errorf("窗口已退出，返回码 %d", returnCode)
 	}
@@ -653,24 +790,16 @@ func setComboMinVisible(combo *walk.ComboBox, count int) {
 
 func (a *legacyApp) header() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(30, 48, 71)},
-		Layout:     HBox{Margins: Margins{Left: 14, Top: 10, Right: 14, Bottom: 10}, Spacing: 10},
+		Background: legacyBrush(legacyLight.TitleBar),
+		MinSize:    Size{Height: 40},
+		MaxSize:    Size{Height: 40},
+		Layout:     HBox{Margins: Margins{Left: 12, Top: 5, Right: 12, Bottom: 5}, Spacing: 8},
 		Children: []Widget{
-			Composite{
-				MinSize:    Size{Width: 5},
-				Background: SolidColorBrush{Color: walk.RGB(72, 161, 221)},
-			},
-			Composite{
-				StretchFactor: 1,
-				Layout:        VBox{MarginsZero: true, Spacing: 4},
-				Children: []Widget{
-					Label{Text: "WinTraceLens Legacy", Font: Font{Family: "Microsoft YaHei UI", PointSize: 14, Bold: true}, TextColor: walk.RGB(255, 255, 255)},
-					Label{Text: "Windows 7 / Server 2012 专用原生界面。模块首次打开会自动采集，耗时操作会在后台执行。", TextColor: walk.RGB(192, 204, 219)},
-				},
-			},
-			PushButton{Text: "恢复窗口", MinSize: Size{Width: 92}, OnClicked: a.restoreWindow},
-			PushButton{Text: "导出取证包", MinSize: Size{Width: 116}, OnClicked: a.exportEvidencePackage},
-			Label{Text: version + "  Go 1.20", TextColor: walk.RGB(213, 222, 233)},
+			HSpacer{},
+			PushButton{AssignTo: &a.densityToggle, Text: "紧凑显示", MinSize: Size{Width: 82, Height: 28}, MaxSize: Size{Width: 82, Height: 28}, OnClicked: func() { a.setTableDensity(!a.compactTables) }},
+			PushButton{Text: "恢复窗口", MinSize: Size{Width: 78, Height: 28}, MaxSize: Size{Width: 78, Height: 28}, OnClicked: a.restoreWindow},
+			PushButton{Text: "帮助", MinSize: Size{Width: 58, Height: 28}, MaxSize: Size{Width: 58, Height: 28}, OnClicked: a.showUIHelp},
+			PushButton{Text: "导出取证包", MinSize: Size{Width: 98, Height: 28}, MaxSize: Size{Width: 98, Height: 28}, OnClicked: a.exportEvidencePackage},
 		},
 	}
 }
@@ -727,149 +856,186 @@ func (a *legacyApp) openSystemTool(label, target string) {
 }
 
 func (a *legacyApp) contentArea() Widget {
-	return TabWidget{
-		AssignTo:              &a.mainTabs,
-		ContentMarginsZero:    true,
-		StretchFactor:         1,
-		OnCurrentIndexChanged: a.onMainTabChanged,
-		Pages: []TabPage{
-			{Title: "进程信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"进程信息",
-				"查看进程路径、父进程、CPU、内存、线程、句柄、MD5、签名状态和当前网络连接数量。",
-				a.summaryBar(&a.processSummary, "等待采集进程信息。"),
-				a.processToolbar(),
-				a.processPage(),
-			)},
-			{Title: "主机信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"主机信息",
-				"汇总服务、计划任务、启动项、本地用户和镜像劫持，适合快速检查持久化位置。",
-				a.summaryBar(&a.hostSummary, "等待采集主机信息。"),
-				a.hostToolbar(),
-				a.hostTable(),
-			)},
-			{Title: "关注项", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"关注项",
-				"集中查看行为关联、进程内存异常和驱动多源核查结果；各列表均可按列排序。",
-				a.summaryBar(&a.findingSummary, "等待生成关注项。"),
-				a.findingToolbar(),
-				a.findingPage(),
-			)},
-			{Title: "事件日志", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"事件日志",
-				"默认读取最近 7 天常见安全事件，建议按时间范围缩小查询以减少旧机器压力。",
-				a.summaryBar(&a.eventSummary, "等待读取事件日志。"),
-				a.eventToolbar(),
-				a.assignedTableWithMinHeight(eventColumns, a.eventModel, &a.eventView, nil, a.eventContextMenu(), 180),
-			)},
-			{Title: "历史通信", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"历史通信",
-				"汇总 Sysmon、DNS Client、WFP、防火墙日志和 DNS 缓存。DNS 缓存没有可靠时间和进程归属。",
-				a.summaryBar(&a.historySummary, "等待读取历史通信。"),
-				a.historyToolbar(),
-				a.assignedTableWithMinHeight(historyColumns, a.historyModel, &a.historyView, nil, a.historyContextMenu(), 180),
-			)},
-			{Title: "文件痕迹", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"文件痕迹",
-				"查看近期文件及 Prefetch、Amcache、Shimcache、UserAssist、LNK/JumpList、USN/$MFT、SRUM 等传统痕迹。",
-				a.summaryBar(&a.fileTraceSummary, "等待扫描文件痕迹。"),
-				a.fileTraceToolbar(),
-				a.assignedTableWithMinHeight(fileTraceColumns, a.fileTraceModel, &a.fileTraceView, nil, a.fileTraceContextMenu(), 180),
-			)},
-			{Title: "注册表异常", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"注册表异常",
-				"受限扫描传统持久化位置和已加载用户 Software 区域，只展示命中多信号异常评分的注册表值。",
-				a.summaryBar(&a.registrySummary, "等待扫描注册表高价值区域。"),
-				a.registryToolbar(),
-				a.assignedTableWithMinHeight(registryColumns, a.registryModel, &a.registryView, nil, a.registryContextMenu(), 180),
-			)},
-			{Title: "AI分析", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
-				"AI分析",
-				"选择在线模型后，把当前采集结果发送给 AI 辅助判断异常点和下一步排查方向。API Key 仅保存在本次运行内存中。",
-				a.summaryBar(&a.aiSummary, "等待配置 AI 分析。"),
-				a.aiToolbar(),
-				a.aiPage(),
-			)},
+	if a.mainNav == nil {
+		a.mainNav = newNavigationBar(
+			[]string{"进程信息", "主机信息", "关注项", "事件日志", "历史通信", "文件痕迹", "注册表异常", "AI 分析"},
+			func(index int) {
+				if a.mainTabs != nil {
+					_ = a.mainTabs.SetCurrentIndex(index)
+				}
+			},
+		)
+	}
+	return Composite{
+		StretchFactor: 1,
+		Background:    legacyBrush(legacyLight.Surface),
+		Layout:        VBox{MarginsZero: true, SpacingZero: true},
+		Children: []Widget{
+			a.mainNav.widgetSpec(35),
+			TabWidget{
+				AssignTo:              &a.mainTabs,
+				ContentMarginsZero:    true,
+				HeaderHidden:          true,
+				StretchFactor:         1,
+				OnCurrentIndexChanged: a.onMainTabChanged,
+				Pages: []TabPage{
+					{Title: "进程信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"进程信息",
+						"查看进程路径、父进程、CPU、内存、线程、句柄、MD5、签名状态和当前网络连接数量。",
+						a.summaryBar(&a.processSummary, "等待采集进程信息。"),
+						a.processToolbar(),
+						a.processPage(),
+					)},
+					{Title: "主机信息", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"主机信息",
+						"汇总服务、计划任务、启动项、本地用户和镜像劫持，适合快速检查持久化位置。",
+						a.summaryBar(&a.hostSummary, "等待采集主机信息。"),
+						a.hostToolbar(),
+						a.hostTable(),
+					)},
+					{Title: "关注项", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"关注项",
+						"集中查看行为关联、进程内存异常和驱动多源核查结果；各列表均可按列排序。",
+						a.summaryBar(&a.findingSummary, "等待生成关注项。"),
+						a.findingToolbar(),
+						a.findingPage(),
+					)},
+					{Title: "事件日志", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"事件日志",
+						"默认读取最近 7 天常见安全事件，建议按时间范围缩小查询以减少旧机器压力。",
+						a.summaryBar(&a.eventSummary, "等待读取事件日志。"),
+						a.eventToolbar(),
+						a.assignedTableWithMinHeight(eventColumns, a.eventModel, &a.eventView, nil, a.eventContextMenu(), 120),
+					)},
+					{Title: "历史通信", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"历史通信",
+						"汇总日志证据、DNS 缓存和当前连接，并在本次运行期间每秒保留一次短连接快照，便于发现间歇 SYN 外联。",
+						a.summaryBar(&a.historySummary, "等待读取历史通信。"),
+						a.historyToolbar(),
+						a.historyPage(),
+					)},
+					{Title: "文件痕迹", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"文件痕迹",
+						"查看近期文件及 Prefetch、Amcache、Shimcache、UserAssist、LNK/JumpList、USN/$MFT、SRUM 等传统痕迹。",
+						a.summaryBar(&a.fileTraceSummary, "等待扫描文件痕迹。"),
+						a.fileTraceToolbar(),
+						a.assignedTableWithMinHeight(fileTraceColumns, a.fileTraceModel, &a.fileTraceView, nil, a.fileTraceContextMenu(), 120),
+					)},
+					{Title: "注册表异常", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"注册表异常",
+						"受限扫描传统持久化位置和已加载用户 Software 区域，只展示命中多信号异常评分的注册表值。",
+						a.summaryBar(&a.registrySummary, "等待扫描注册表高价值区域。"),
+						a.registryToolbar(),
+						a.assignedTableWithMinHeight(registryColumns, a.registryModel, &a.registryView, nil, a.registryContextMenu(), 120),
+					)},
+					{Title: "AI分析", Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: a.modulePage(
+						"AI分析",
+						"选择在线模型后，把当前采集结果发送给 AI 辅助判断异常点和下一步排查方向。API Key 仅保存在本次运行内存中。",
+						a.summaryBar(&a.aiSummary, "等待配置 AI 分析。"),
+						a.aiToolbar(),
+						a.aiPage(),
+					)},
+				},
+			},
 		},
 	}
 }
 
-func (a *legacyApp) modulePage(title, detail string, summary Widget, toolbar Widget, body Widget) []Widget {
+func (a *legacyApp) modulePage(_ string, _ string, summary Widget, toolbar Widget, body Widget) []Widget {
 	return []Widget{
-		Composite{
-			Background: SolidColorBrush{Color: walk.RGB(255, 255, 255)},
-			Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 8}, Spacing: 6},
-			Children: []Widget{
-				Label{Text: title, Font: Font{Family: "Microsoft YaHei UI", PointSize: 11, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
-				Label{Text: detail, TextColor: walk.RGB(86, 99, 118)},
-				summary,
-				toolbar,
-			},
-		},
+		summary,
+		toolbar,
 		body,
 	}
 }
 
 func (a *legacyApp) summaryBar(assignTo **walk.Label, text string) Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(237, 245, 252)},
-		Layout:     HBox{Margins: Margins{Left: 10, Top: 4, Right: 10, Bottom: 4}},
+		Background: legacyBrush(legacyLight.SummaryBackground),
+		Layout:     HBox{Margins: Margins{Left: 8, Top: 3, Right: 8, Bottom: 3}},
 		Children: []Widget{
-			Label{AssignTo: assignTo, Text: text, TextColor: walk.RGB(40, 74, 108), StretchFactor: 1},
+			Label{AssignTo: assignTo, Text: text, TextColor: legacyLight.SummaryText},
+			HSpacer{},
 		},
 	}
 }
 
 func (a *legacyApp) processToolbar() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
-		Layout:     HBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 8},
+		Background: legacyBrush(legacyLight.Chrome),
+		Layout:     HBox{Margins: Margins{Left: 8, Top: 5, Right: 8, Bottom: 5}, Spacing: 6},
 		Children: []Widget{
-			Label{Text: "关键字", TextColor: walk.RGB(50, 67, 89)},
-			LineEdit{AssignTo: &a.processSearch, StretchFactor: 1, OnTextChanged: a.applyProcessFilter},
-			Label{Text: "进程名 / PID / MD5 / 路径 / 签名，支持 /正则/i", TextColor: walk.RGB(112, 122, 138)},
-			PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshProcesses},
-			PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: func() { a.showTableRowDetails(a.processView, a.processModel, "进程完整信息") }},
-			PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: func() { a.exportModel("processes", a.processModel) }},
+			Label{Text: "搜索", TextColor: legacyLight.Text},
+			LineEdit{AssignTo: &a.processSearch, MinSize: Size{Width: 180}, MaxSize: Size{Width: 420}, StretchFactor: 1, OnTextChanged: a.applyProcessFilter},
+			PushButton{Text: "刷新", MinSize: Size{Width: 68}, MaxSize: Size{Width: 68}, OnClicked: a.refreshProcesses},
+			PushButton{AssignTo: &a.processDetailToggle, Text: "收起详情", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.toggleProcessDetailPanel},
+			PushButton{Text: "导出 CSV", MinSize: Size{Width: 82}, MaxSize: Size{Width: 82}, OnClicked: func() { a.exportModel("processes", a.processModel) }},
+			HSpacer{},
 		},
 	}
 }
 
 func (a *legacyApp) processPage() Widget {
 	return VSplitter{
+		AssignTo:      &a.processSplitter,
 		StretchFactor: 1,
-		HandleWidth:   5,
+		HandleWidth:   4,
 		Children: []Widget{
-			a.assignedTableWithMinHeight(processColumns, a.processModel, &a.processView, a.onProcessSelected, a.processContextMenu(), 220),
+			a.assignedTableWithMinHeight(processColumns, a.processModel, &a.processView, a.onProcessSelected, a.processContextMenu(), 120),
 			a.processDetailPanel(),
 		},
 	}
 }
 
 func (a *legacyApp) processDetailPanel() Widget {
-	return ScrollView{
-		HorizontalFixed: true,
-		VerticalFixed:   false,
-		StretchFactor:   1,
-		MinSize:         Size{Height: 120},
-		Background:      SolidColorBrush{Color: walk.RGB(242, 246, 251)},
-		Layout:          VBox{Margins: Margins{Left: 0, Top: 0, Right: 0, Bottom: 0}, Spacing: 4},
+	if a.processDetailNav == nil {
+		a.processDetailNav = newNavigationBar(
+			[]string{"基本信息", "模块列表", "网络连接"},
+			func(index int) {
+				if a.processDetailTabs != nil {
+					_ = a.processDetailTabs.SetCurrentIndex(index)
+				}
+			},
+		)
+	}
+	return Composite{
+		AssignTo:      &a.processDetailPane,
+		StretchFactor: 1,
+		MinSize:       Size{Height: 185},
+		MaxSize:       Size{Height: 235},
+		Background:    legacyBrush(legacyLight.Chrome),
+		Layout:        VBox{Margins: Margins{Left: 0, Top: 0, Right: 0, Bottom: 0}, Spacing: 4},
 		Children: []Widget{
 			Composite{
-				Background: SolidColorBrush{Color: walk.RGB(255, 255, 255)},
-				Layout:     HBox{Margins: Margins{Left: 12, Top: 6, Right: 12, Bottom: 6}, Spacing: 8},
+				Background: legacyBrush(legacyLight.Surface),
+				MinSize:    Size{Height: 30},
+				MaxSize:    Size{Height: 30},
+				Layout:     HBox{MarginsZero: true, Spacing: 6},
 				Children: []Widget{
-					Label{Text: "进程详情", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
-					Label{AssignTo: &a.processDetail, Text: "选择进程后显示模块列表和网络连接。", TextColor: walk.RGB(70, 82, 98), StretchFactor: 1},
-					PushButton{Text: "刷新详情", MinSize: Size{Width: 84}, OnClicked: a.refreshSelectedProcessDetails},
-					PushButton{Text: "导出模块", MinSize: Size{Width: 84}, OnClicked: a.exportSelectedModules},
-					PushButton{Text: "导出连接", MinSize: Size{Width: 84}, OnClicked: a.exportSelectedConnections},
+					a.processDetailNav.widgetSpec(30),
+					SplitButton{
+						Text:    "详情操作",
+						MinSize: Size{Width: 90, Height: 27},
+						MaxSize: Size{Width: 90, Height: 27},
+						MenuItems: []MenuItem{
+							Action{Text: "查看完整信息", OnTriggered: func() { a.showTableRowDetails(a.processView, a.processModel, "进程完整信息") }},
+							Action{Text: "刷新详情", OnTriggered: a.refreshSelectedProcessDetails},
+							Action{Text: "导出模块", OnTriggered: a.exportSelectedModules},
+							Action{Text: "导出连接", OnTriggered: a.exportSelectedConnections},
+						},
+					},
 				},
 			},
 			TabWidget{
+				AssignTo:           &a.processDetailTabs,
 				ContentMarginsZero: true,
+				HeaderHidden:       true,
 				StretchFactor:      1,
 				MinSize:            Size{Height: 100},
 				Pages: []TabPage{
+					{Title: "基本信息", Layout: VBox{Margins: Margins{Left: 4, Top: 4, Right: 4, Bottom: 4}}, Children: []Widget{
+						a.processBasicPanel(),
+					}},
 					{Title: "模块列表", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
 						a.assignedTableWithMinHeight(processModuleColumns, a.moduleModel, &a.moduleView, nil, a.moduleContextMenu(), 90),
 					}},
@@ -882,73 +1048,126 @@ func (a *legacyApp) processDetailPanel() Widget {
 	}
 }
 
-func (a *legacyApp) hostToolbar() Widget {
+func (a *legacyApp) processBasicPanel() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
+		Background: legacyBrush(legacyLight.Surface),
+		Layout:     Grid{Columns: 4, Margins: Margins{Left: 8, Top: 4, Right: 8, Bottom: 4}, Spacing: 5},
+		Children: []Widget{
+			Label{Row: 0, Column: 0, Text: "进程 / PID", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 0, Column: 1, AssignTo: &a.processInfoIdentity, ReadOnly: true, StretchFactor: 1},
+			Label{Row: 0, Column: 2, Text: "父进程", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 0, Column: 3, AssignTo: &a.processInfoParent, ReadOnly: true, StretchFactor: 1},
+			Label{Row: 1, Column: 0, Text: "资源", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 1, Column: 1, AssignTo: &a.processInfoResources, ReadOnly: true, StretchFactor: 1},
+			Label{Row: 1, Column: 2, Text: "签名", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 1, Column: 3, AssignTo: &a.processInfoSignature, ReadOnly: true, StretchFactor: 1},
+			Label{Row: 2, Column: 0, Text: "创建时间", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 2, Column: 1, AssignTo: &a.processInfoCreated, ReadOnly: true, StretchFactor: 1},
+			Label{Row: 2, Column: 2, Text: "MD5", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 2, Column: 3, AssignTo: &a.processInfoMD5, ReadOnly: true, StretchFactor: 1},
+			Label{Row: 3, Column: 0, Text: "路径", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 3, Column: 1, ColumnSpan: 3, AssignTo: &a.processInfoPath, ReadOnly: true, StretchFactor: 1},
+			Label{Row: 4, Column: 0, Text: "命令行", TextColor: legacyLight.MutedText},
+			LineEdit{Row: 4, Column: 1, ColumnSpan: 3, AssignTo: &a.processInfoCommand, ReadOnly: true, StretchFactor: 1},
+		},
+	}
+}
+
+func (a *legacyApp) hostToolbar() Widget {
+	if a.hostNav == nil {
+		kinds := []string{"services", "tasks", "startup", "users", "ifeo", "persistence"}
+		a.hostNav = newNavigationBar(
+			[]string{"服务", "计划任务", "启动项", "用户", "镜像劫持", "持久化"},
+			func(index int) {
+				if index >= 0 && index < len(kinds) {
+					a.setHostKind(kinds[index])
+				}
+			},
+		)
+	}
+	return Composite{
+		Background: legacyBrush(legacyLight.Chrome),
+		MinSize:    Size{Height: 122},
+		MaxSize:    Size{Height: 122},
 		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
 		Children: []Widget{
-			Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
-				PushButton{Text: "服务", MinSize: Size{Width: 72}, OnClicked: func() { a.setHostKind("services") }},
-				PushButton{Text: "计划任务", MinSize: Size{Width: 84}, OnClicked: func() { a.setHostKind("tasks") }},
-				PushButton{Text: "启动项", MinSize: Size{Width: 72}, OnClicked: func() { a.setHostKind("startup") }},
-				PushButton{Text: "用户", MinSize: Size{Width: 62}, OnClicked: func() { a.setHostKind("users") }},
-				PushButton{Text: "镜像劫持", MinSize: Size{Width: 84}, OnClicked: func() { a.setHostKind("ifeo") }},
-				PushButton{Text: "持久化", MinSize: Size{Width: 78}, OnClicked: func() { a.setHostKind("persistence") }},
-				Label{Text: "关键字", TextColor: walk.RGB(50, 67, 89)},
-				LineEdit{AssignTo: &a.hostSearch, StretchFactor: 1, OnTextChanged: a.applyHostFilter},
-				PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshHost},
-				PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: func() { a.showTableRowDetails(a.hostView, a.hostModel, "主机信息详情") }},
-				PushButton{Text: "导出当前表", MinSize: Size{Width: 110}, OnClicked: a.exportCurrentHostTable},
+			Composite{MinSize: Size{Height: 30}, MaxSize: Size{Height: 30}, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				a.hostNav.widgetSpec(30),
+				PushButton{Text: "刷新", MinSize: Size{Width: 68}, MaxSize: Size{Width: 68}, OnClicked: a.refreshHost},
 			}},
-			Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
-				Label{Text: "系统界面跳转", TextColor: walk.RGB(50, 67, 89)},
-				PushButton{Text: "服务管理器", MinSize: Size{Width: 92}, OnClicked: func() { a.openSystemTool("服务管理器", "services.msc") }},
-				PushButton{Text: "任务计划程序", MinSize: Size{Width: 104}, OnClicked: func() { a.openSystemTool("任务计划程序", "taskschd.msc") }},
-				PushButton{Text: "系统配置启动项", MinSize: Size{Width: 118}, OnClicked: func() { a.openSystemTool("系统配置启动项", "msconfig.exe") }},
-				PushButton{Text: "本地用户和组", MinSize: Size{Width: 104}, OnClicked: func() { a.openSystemTool("本地用户和组", "lusrmgr.msc") }},
-				PushButton{Text: "注册表", MinSize: Size{Width: 76}, OnClicked: func() { a.openSystemTool("注册表", "regedit.exe") }},
+			Composite{MinSize: Size{Height: 32}, MaxSize: Size{Height: 32}, Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
+				Label{Text: "搜索", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.hostSearch, MinSize: Size{Width: 180}, MaxSize: Size{Width: 500}, StretchFactor: 1, OnTextChanged: a.applyHostFilter},
+				PushButton{Text: "查看详情", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: func() { a.showTableRowDetails(a.hostView, a.hostModel, "主机信息详情") }},
+				PushButton{Text: "导出当前表", MinSize: Size{Width: 94}, MaxSize: Size{Width: 94}, OnClicked: a.exportCurrentHostTable},
 				HSpacer{},
-				Label{Text: "用于与本工具采集结果对比", TextColor: walk.RGB(112, 122, 138)},
+			}},
+			Composite{MinSize: Size{Height: 32}, MaxSize: Size{Height: 32}, Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
+				Label{Text: "系统界面跳转", TextColor: legacyLight.Text},
+				PushButton{Text: "服务管理器", MinSize: Size{Width: 86}, MaxSize: Size{Width: 86}, OnClicked: func() { a.openSystemTool("服务管理器", "services.msc") }},
+				PushButton{Text: "任务计划", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: func() { a.openSystemTool("任务计划程序", "taskschd.msc") }},
+				PushButton{Text: "启动项", MinSize: Size{Width: 66}, MaxSize: Size{Width: 66}, OnClicked: func() { a.openSystemTool("系统配置启动项", "msconfig.exe") }},
+				PushButton{Text: "本地用户", MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}, OnClicked: func() { a.openSystemTool("本地用户和组", "lusrmgr.msc") }},
+				PushButton{Text: "注册表", MinSize: Size{Width: 66}, MaxSize: Size{Width: 66}, OnClicked: func() { a.openSystemTool("注册表", "regedit.exe") }},
+				HSpacer{},
 			}},
 		},
 	}
 }
 
 func (a *legacyApp) hostTable() Widget {
-	return a.assignedTableWithMinHeight(hostColumns, a.hostModel, &a.hostView, nil, a.hostContextMenu(), 180)
+	return a.assignedTableWithMinHeight(hostColumns, a.hostModel, &a.hostView, nil, a.hostContextMenu(), 120)
 }
 
 func (a *legacyApp) findingToolbar() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
+		Background: legacyBrush(legacyLight.Chrome),
 		Layout:     HBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 8},
 		Children: []Widget{
-			Label{Text: "关键字", TextColor: walk.RGB(50, 67, 89)},
-			LineEdit{AssignTo: &a.findingSearch, StretchFactor: 1, OnTextChanged: a.applyFindingFilter},
-			Label{Text: "级别 / 来源 / 原因 / MD5 / 路径", TextColor: walk.RGB(112, 122, 138)},
-			PushButton{Text: "刷新", MinSize: Size{Width: 84}, OnClicked: a.refreshFindings},
-			PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: a.showCurrentFindingDetails},
-			PushButton{Text: "导出当前表", MinSize: Size{Width: 104}, OnClicked: a.exportCurrentFindingTable},
+			Label{Text: "搜索", TextColor: legacyLight.Text},
+			LineEdit{AssignTo: &a.findingSearch, MinSize: Size{Width: 180}, MaxSize: Size{Width: 500}, StretchFactor: 1, OnTextChanged: a.applyFindingFilter},
+			PushButton{Text: "刷新", MinSize: Size{Width: 68}, MaxSize: Size{Width: 68}, OnClicked: a.refreshFindings},
+			PushButton{Text: "查看详情", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.showCurrentFindingDetails},
+			PushButton{Text: "导出当前表", MinSize: Size{Width: 94}, MaxSize: Size{Width: 94}, OnClicked: a.exportCurrentFindingTable},
+			HSpacer{},
 		},
 	}
 }
 
 func (a *legacyApp) findingPage() Widget {
-	return TabWidget{
-		AssignTo:              &a.findingTabs,
-		ContentMarginsZero:    true,
-		StretchFactor:         1,
-		OnCurrentIndexChanged: a.onFindingTabChanged,
-		Pages: []TabPage{
-			{Title: "综合风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-				a.assignedTableWithMinHeight(findingColumns, a.findingModel, &a.findingView, nil, a.findingRowsContextMenu(), 180),
-			}},
-			{Title: "内存异常", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-				a.assignedTableWithMinHeight(memoryColumns, a.memoryModel, &a.memoryView, nil, a.memoryContextMenu(), 180),
-			}},
-			{Title: "驱动风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
-				a.assignedTableWithMinHeight(driverColumns, a.driverModel, &a.driverView, nil, a.driverContextMenu(), 180),
-			}},
+	if a.findingNav == nil {
+		a.findingNav = newNavigationBar(
+			[]string{"综合风险", "内存异常", "驱动风险"},
+			func(index int) {
+				if a.findingTabs != nil {
+					_ = a.findingTabs.SetCurrentIndex(index)
+				}
+			},
+		)
+	}
+	return Composite{
+		StretchFactor: 1,
+		Layout:        VBox{MarginsZero: true, SpacingZero: true},
+		Children: []Widget{
+			a.findingNav.widgetSpec(30),
+			TabWidget{
+				AssignTo:              &a.findingTabs,
+				ContentMarginsZero:    true,
+				HeaderHidden:          true,
+				StretchFactor:         1,
+				OnCurrentIndexChanged: a.onFindingTabChanged,
+				Pages: []TabPage{
+					{Title: "综合风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
+						a.assignedTableWithMinHeight(findingColumns, a.findingModel, &a.findingView, nil, a.findingRowsContextMenu(), 120),
+					}},
+					{Title: "内存异常", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
+						a.assignedTableWithMinHeight(memoryColumns, a.memoryModel, &a.memoryView, nil, a.memoryContextMenu(), 120),
+					}},
+					{Title: "驱动风险", Layout: VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}}, Children: []Widget{
+						a.assignedTableWithMinHeight(driverColumns, a.driverModel, &a.driverView, nil, a.driverContextMenu(), 120),
+					}},
+				},
+			},
 		},
 	}
 }
@@ -956,32 +1175,35 @@ func (a *legacyApp) findingPage() Widget {
 func (a *legacyApp) eventToolbar() Widget {
 	start := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
 	end := time.Now().Format("2006-01-02")
+	if a.eventNav == nil {
+		categories := []string{"all", "logon-success", "logon-failed", "rdp", "service", "user-create", "powershell"}
+		a.eventNav = newNavigationBar(
+			[]string{"全部", "登录成功", "登录失败", "RDP", "服务创建", "用户创建", "PowerShell"},
+			func(index int) {
+				if index >= 0 && index < len(categories) {
+					a.setEventCategory(categories[index])
+				}
+			},
+		)
+	}
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
+		Background: legacyBrush(legacyLight.Chrome),
 		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "开始", TextColor: walk.RGB(50, 67, 89)},
-				LineEdit{AssignTo: &a.eventStart, Text: start, MaxSize: Size{Width: 110}},
-				Label{Text: "结束", TextColor: walk.RGB(50, 67, 89)},
-				LineEdit{AssignTo: &a.eventEnd, Text: end, MaxSize: Size{Width: 110}},
-				Label{Text: "条数", TextColor: walk.RGB(50, 67, 89)},
-				LineEdit{AssignTo: &a.eventMax, Text: "500", MaxSize: Size{Width: 70}},
-				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
-				LineEdit{AssignTo: &a.eventSearch, StretchFactor: 1, OnTextChanged: a.applyEventFilter},
-				PushButton{Text: "读取日志", MinSize: Size{Width: 92}, OnClicked: a.refreshEvents},
-				PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: a.exportCurrentEvents},
+				Label{Text: "开始", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.eventStart, Text: start, MinSize: Size{Width: 96}, MaxSize: Size{Width: 96}},
+				Label{Text: "结束", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.eventEnd, Text: end, MinSize: Size{Width: 96}, MaxSize: Size{Width: 96}},
+				Label{Text: "条数", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.eventMax, Text: "500", MinSize: Size{Width: 58}, MaxSize: Size{Width: 58}},
+				Label{Text: "搜索", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.eventSearch, MinSize: Size{Width: 90}, MaxSize: Size{Width: 180}, StretchFactor: 1, OnTextChanged: a.applyEventFilter},
+				PushButton{Text: "读取日志", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.refreshEvents},
+				PushButton{Text: "导出 CSV", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.exportCurrentEvents},
+				HSpacer{},
 			}},
-			Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
-				Label{Text: "分类", TextColor: walk.RGB(50, 67, 89)},
-				PushButton{Text: "全部", MinSize: Size{Width: 58}, OnClicked: func() { a.setEventCategory("all") }},
-				PushButton{Text: "登录成功", MinSize: Size{Width: 78}, OnClicked: func() { a.setEventCategory("logon-success") }},
-				PushButton{Text: "登录失败", MinSize: Size{Width: 78}, OnClicked: func() { a.setEventCategory("logon-failed") }},
-				PushButton{Text: "RDP", MinSize: Size{Width: 58}, OnClicked: func() { a.setEventCategory("rdp") }},
-				PushButton{Text: "服务创建", MinSize: Size{Width: 78}, OnClicked: func() { a.setEventCategory("service") }},
-				PushButton{Text: "用户创建", MinSize: Size{Width: 78}, OnClicked: func() { a.setEventCategory("user-create") }},
-				PushButton{Text: "PowerShell", MinSize: Size{Width: 92}, OnClicked: func() { a.setEventCategory("powershell") }},
-			}},
+			a.eventNav.widgetSpec(30),
 		},
 	}
 }
@@ -989,45 +1211,93 @@ func (a *legacyApp) eventToolbar() Widget {
 func (a *legacyApp) historyToolbar() Widget {
 	start := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
 	end := time.Now().Format("2006-01-02")
+	if a.historyNav == nil {
+		a.historyNav = newNavigationBar(
+			[]string{"连接历史", "DNS 记录", "当前连接", "短连接监测", "全部证据"},
+			func(index int) {
+				if a.historyTabs != nil {
+					_ = a.historyTabs.SetCurrentIndex(index)
+				}
+			},
+		)
+	}
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
-		Layout:     HBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 8},
+		Background: legacyBrush(legacyLight.Chrome),
+		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
 		Children: []Widget{
-			Label{Text: "开始", TextColor: walk.RGB(50, 67, 89)},
-			LineEdit{AssignTo: &a.historyStart, Text: start, MaxSize: Size{Width: 110}},
-			Label{Text: "结束", TextColor: walk.RGB(50, 67, 89)},
-			LineEdit{AssignTo: &a.historyEnd, Text: end, MaxSize: Size{Width: 110}},
-			Label{Text: "条数", TextColor: walk.RGB(50, 67, 89)},
-			LineEdit{AssignTo: &a.historyMax, Text: "500", MaxSize: Size{Width: 70}},
-			Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
-			LineEdit{AssignTo: &a.historySearch, StretchFactor: 1, OnTextChanged: a.applyHistoryFilter},
-			PushButton{Text: "读取记录", MinSize: Size{Width: 92}, OnClicked: a.refreshHistory},
-			PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: func() { a.exportModel("network-history", a.historyModel) }},
+			Composite{MinSize: Size{Height: 30}, MaxSize: Size{Height: 30}, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				a.historyNav.widgetSpec(30),
+				PushButton{Text: "刷新视图", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.refreshAllHistoryViews},
+			}},
+			Composite{MinSize: Size{Height: 30}, MaxSize: Size{Height: 30}, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				Label{Text: "历史范围", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.historyStart, Text: start, MinSize: Size{Width: 96}, MaxSize: Size{Width: 96}},
+				Label{Text: "至", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.historyEnd, Text: end, MinSize: Size{Width: 96}, MaxSize: Size{Width: 96}},
+				Label{Text: "条数", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.historyMax, Text: "500", MinSize: Size{Width: 58}, MaxSize: Size{Width: 58}},
+				PushButton{Text: "读取历史", MinSize: Size{Width: 82}, MaxSize: Size{Width: 82}, OnClicked: a.refreshHistory},
+				HSpacer{},
+			}},
+			Composite{MinSize: Size{Height: 30}, MaxSize: Size{Height: 30}, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				Label{Text: "搜索", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.historySearch, MinSize: Size{Width: 180}, MaxSize: Size{Width: 520}, StretchFactor: 1, OnTextChanged: a.applyHistoryFilter},
+				PushButton{Text: "查看详情", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.showCurrentHistoryDetails},
+				PushButton{Text: "导出当前表", MinSize: Size{Width: 94}, MaxSize: Size{Width: 94}, OnClicked: a.exportCurrentHistoryTable},
+				HSpacer{},
+			}},
+		},
+	}
+}
+
+func (a *legacyApp) historyPage() Widget {
+	return TabWidget{
+		AssignTo:              &a.historyTabs,
+		ContentMarginsZero:    true,
+		HeaderHidden:          true,
+		StretchFactor:         1,
+		OnCurrentIndexChanged: a.onHistoryTabChanged,
+		Pages: []TabPage{
+			{Title: "连接历史", Layout: VBox{MarginsZero: true}, Children: []Widget{
+				a.assignedTableWithMinHeight(historyConnectionColumns, a.historyConnectionModel, &a.historyConnectionView, nil, a.historyContextMenu(), 120),
+			}},
+			{Title: "DNS 记录", Layout: VBox{MarginsZero: true}, Children: []Widget{
+				a.assignedTableWithMinHeight(historyDNSColumns, a.historyDNSModel, &a.historyDNSView, nil, a.historyContextMenu(), 120),
+			}},
+			{Title: "当前连接", Layout: VBox{MarginsZero: true}, Children: []Widget{
+				a.assignedTableWithMinHeight(historyLiveColumns, a.historyLiveModel, &a.historyLiveView, nil, a.historyContextMenu(), 120),
+			}},
+			{Title: "短连接监测", Layout: VBox{MarginsZero: true}, Children: []Widget{
+				a.assignedTableWithMinHeight(historyMonitorColumns, a.historyMonitorModel, &a.historyMonitorView, nil, a.historyContextMenu(), 120),
+			}},
+			{Title: "全部证据", Layout: VBox{MarginsZero: true}, Children: []Widget{
+				a.assignedTableWithMinHeight(historyAllColumns, a.historyAllModel, &a.historyAllView, nil, a.historyContextMenu(), 120),
+			}},
 		},
 	}
 }
 
 func (a *legacyApp) fileTraceToolbar() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
+		Background: legacyBrush(legacyLight.Chrome),
 		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "最近小时", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "最近小时", TextColor: legacyLight.Text},
 				LineEdit{AssignTo: &a.fileTraceHours, Text: "72", MaxSize: Size{Width: 70}},
-				Label{Text: "条数", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "条数", TextColor: legacyLight.Text},
 				LineEdit{AssignTo: &a.fileTraceMax, Text: "500", MaxSize: Size{Width: 70}},
-				Label{Text: "取证源", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "取证源", TextColor: legacyLight.Text},
 				ComboBox{AssignTo: &a.fileTraceKind, Model: fileTraceKindOptions(), CurrentIndex: 0, MinSize: Size{Width: 140}, MaxSize: Size{Width: 170}, OnBoundsChanged: func() { setComboMinVisible(a.fileTraceKind, 10) }, OnCurrentIndexChanged: a.applyFileTraceFilter},
-				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
-				LineEdit{AssignTo: &a.fileTraceSearch, StretchFactor: 1, OnTextChanged: a.applyFileTraceFilter},
-				PushButton{Text: "开始扫描", MinSize: Size{Width: 92}, OnClicked: a.refreshFileTrace},
-				PushButton{Text: "导出 CSV", MinSize: Size{Width: 96}, OnClicked: func() { a.exportModel("file-traces", a.fileTraceModel) }},
+				PushButton{Text: "开始扫描", MinSize: Size{Width: 82}, MaxSize: Size{Width: 82}, OnClicked: a.refreshFileTrace},
+				PushButton{Text: "导出 CSV", MinSize: Size{Width: 82}, MaxSize: Size{Width: 82}, OnClicked: func() { a.exportModel("file-traces", a.fileTraceModel) }},
+				HSpacer{},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "扫描目录", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "搜索", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.fileTraceSearch, StretchFactor: 1, OnTextChanged: a.applyFileTraceFilter},
+				Label{Text: "扫描目录", TextColor: legacyLight.Text},
 				LineEdit{AssignTo: &a.fileTraceRoots, StretchFactor: 1},
-				Label{Text: "可选，多个目录用分号分隔；C 盘全盘可能较慢。", TextColor: walk.RGB(112, 122, 138)},
 			}},
 		},
 	}
@@ -1035,23 +1305,24 @@ func (a *legacyApp) fileTraceToolbar() Widget {
 
 func (a *legacyApp) registryToolbar() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
+		Background: legacyBrush(legacyLight.Chrome),
 		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "风险", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "风险", TextColor: legacyLight.Text},
 				ComboBox{AssignTo: &a.registryRisk, Model: []string{"全部风险", "高风险", "中风险", "低风险"}, CurrentIndex: 0, MinSize: Size{Width: 100}, MaxSize: Size{Width: 120}, OnBoundsChanged: func() { setComboMinVisible(a.registryRisk, 4) }, OnCurrentIndexChanged: a.applyRegistryFilter},
-				Label{Text: "最多", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "最多", TextColor: legacyLight.Text},
 				LineEdit{AssignTo: &a.registryMax, Text: "500", MaxSize: Size{Width: 70}},
-				Label{Text: "搜索", TextColor: walk.RGB(50, 67, 89)},
-				LineEdit{AssignTo: &a.registrySearch, StretchFactor: 1, OnTextChanged: a.applyRegistryFilter},
-				PushButton{Text: "重新扫描", MinSize: Size{Width: 88}, OnClicked: a.refreshRegistry},
-				PushButton{Text: "导出 CSV", MinSize: Size{Width: 92}, OnClicked: func() { a.exportModel("registry-anomalies", a.registryModel) }},
+				Label{Text: "搜索", TextColor: legacyLight.Text},
+				LineEdit{AssignTo: &a.registrySearch, MinSize: Size{Width: 120}, MaxSize: Size{Width: 340}, StretchFactor: 1, OnTextChanged: a.applyRegistryFilter},
+				PushButton{Text: "重新扫描", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.refreshRegistry},
+				PushButton{Text: "导出 CSV", MinSize: Size{Width: 82}, MaxSize: Size{Width: 82}, OnClicked: func() { a.exportModel("registry-anomalies", a.registryModel) }},
+				HSpacer{},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				PushButton{Text: "查看详情", MinSize: Size{Width: 88}, OnClicked: a.showSelectedRegistryDetails},
-				PushButton{Text: "导出选中值", MinSize: Size{Width: 104}, OnClicked: a.exportSelectedRegistryValue},
-				Label{Text: "大体积 REG_BINARY 只是待核查信号；需结合高熵、PE/代码特征、异常位置或关联证据判断。", TextColor: walk.RGB(112, 122, 138), StretchFactor: 1},
+				PushButton{Text: "查看详情", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.showSelectedRegistryDetails},
+				PushButton{Text: "导出选中值", MinSize: Size{Width: 94}, MaxSize: Size{Width: 94}, OnClicked: a.exportSelectedRegistryValue},
+				HSpacer{},
 			}},
 		},
 	}
@@ -1059,23 +1330,23 @@ func (a *legacyApp) registryToolbar() Widget {
 
 func (a *legacyApp) aiToolbar() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: walk.RGB(246, 248, 251)},
+		Background: legacyBrush(legacyLight.Chrome),
 		Layout:     VBox{Margins: Margins{Left: 10, Top: 7, Right: 10, Bottom: 7}, Spacing: 6},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "厂商", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "厂商", TextColor: legacyLight.Text},
 				ComboBox{AssignTo: &a.aiProvider, Model: []string{"OpenAI", "DeepSeek", "Kimi", "Qwen", "Custom"}, CurrentIndex: 0, Editable: true, MinSize: Size{Width: 130}, MaxSize: Size{Width: 150}, OnBoundsChanged: func() { setComboMinVisible(a.aiProvider, 5) }, OnCurrentIndexChanged: a.onAIProviderChanged},
-				Label{Text: "模型", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "模型", TextColor: legacyLight.Text},
 				ComboBox{AssignTo: &a.aiModel, Model: aiModelOptions(), CurrentIndex: 0, Editable: true, MinSize: Size{Width: 190}, MaxSize: Size{Width: 240}, OnBoundsChanged: func() { setComboMinVisible(a.aiModel, 10) }},
+				PushButton{Text: "开始分析", MinSize: Size{Width: 84}, MaxSize: Size{Width: 84}, OnClicked: a.startAIAnalysis},
+				PushButton{Text: "复制结果", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.copyAITranscript},
+				PushButton{Text: "清空对话", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.clearAIConversation},
 				HSpacer{},
-				PushButton{Text: "开始分析", MinSize: Size{Width: 94}, OnClicked: a.startAIAnalysis},
-				PushButton{Text: "复制结果", MinSize: Size{Width: 86}, OnClicked: a.copyAITranscript},
-				PushButton{Text: "清空对话", MinSize: Size{Width: 86}, OnClicked: a.clearAIConversation},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "API Key", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "API Key", TextColor: legacyLight.Text},
 				LineEdit{AssignTo: &a.aiAPIKey, PasswordMode: true, StretchFactor: 1},
-				Label{Text: "接口地址", TextColor: walk.RGB(50, 67, 89)},
+				Label{Text: "接口地址", TextColor: legacyLight.Text},
 				LineEdit{AssignTo: &a.aiBaseURL, StretchFactor: 1},
 			}},
 		},
@@ -1089,51 +1360,56 @@ func (a *legacyApp) aiPage() Widget {
 		Children: []Widget{
 			Composite{
 				MinSize:    Size{Width: 330},
-				Background: SolidColorBrush{Color: walk.RGB(255, 255, 255)},
-				Layout:     VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}, Spacing: 6},
+				MaxSize:    Size{Width: 330},
+				Background: legacyBrush(legacyLight.Surface),
+				Layout:     VBox{Margins: Margins{Left: 10, Top: 8, Right: 10, Bottom: 8}, Spacing: 4},
 				Children: []Widget{
-					Label{Text: "证据范围", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
-					Composite{Layout: HBox{MarginsZero: true, Spacing: 4}, Children: []Widget{
-						CheckBox{AssignTo: &a.aiSecProcesses, Text: "进程信息", Checked: true},
-						CheckBox{AssignTo: &a.aiSecFindings, Text: "关注项", Checked: true},
-						CheckBox{AssignTo: &a.aiSecHost, Text: "主机信息", Checked: true},
-						CheckBox{AssignTo: &a.aiSecFileTrace, Text: "文件痕迹", Checked: true},
+					Label{Text: "证据范围", Font: legacyFont(9, true), TextColor: legacyLight.Text},
+					Composite{Layout: HBox{MarginsZero: true, Spacing: 2}, Children: []Widget{
+						CheckBox{AssignTo: &a.aiSecProcesses, Text: "进程信息", Checked: true, MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}},
+						CheckBox{AssignTo: &a.aiSecFindings, Text: "关注项", Checked: true, MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}},
+						CheckBox{AssignTo: &a.aiSecHost, Text: "主机信息", Checked: true, MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}},
+						CheckBox{AssignTo: &a.aiSecFileTrace, Text: "文件痕迹", Checked: true, MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}},
 					}},
-					Composite{Layout: HBox{MarginsZero: true, Spacing: 4}, Children: []Widget{
-						CheckBox{AssignTo: &a.aiSecRegistry, Text: "注册表异常", Checked: true},
-						CheckBox{AssignTo: &a.aiSecHistory, Text: "历史通信", Checked: true},
-						CheckBox{AssignTo: &a.aiSecSecurity, Text: "事件日志", Checked: true},
-						HSpacer{},
+					Composite{Layout: HBox{MarginsZero: true, Spacing: 2}, Children: []Widget{
+						CheckBox{AssignTo: &a.aiSecRegistry, Text: "注册表异常", Checked: true, MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}},
+						CheckBox{AssignTo: &a.aiSecHistory, Text: "历史通信", Checked: true, MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}},
+						CheckBox{AssignTo: &a.aiSecSecurity, Text: "事件日志", Checked: true, MinSize: Size{Width: 76}, MaxSize: Size{Width: 76}},
+						HSpacer{MinSize: Size{Width: 76}},
 					}},
-					Label{Text: "分析问题", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
+					Label{Text: "分析问题", Font: legacyFont(9, true), TextColor: legacyLight.Text},
 					TextEdit{
 						AssignTo:      &a.aiQuestion,
 						Text:          "请基于 WinTraceLens 采集结果判断当前主机是否存在挖矿、蠕虫、远控或持久化风险，并给出下一步排查建议。",
 						VScroll:       true,
 						CompactHeight: false,
-						MinSize:       Size{Height: 120},
+						MinSize:       Size{Height: 56},
+						MaxSize:       Size{Height: 64},
 					},
+					VSpacer{},
 				},
 			},
 			Composite{
 				StretchFactor: 1,
-				Background:    SolidColorBrush{Color: walk.RGB(255, 255, 255)},
+				Background:    legacyBrush(legacyLight.Surface),
 				Layout:        VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}, Spacing: 8},
 				Children: []Widget{
-					Label{Text: "分析结果", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
+					Label{Text: "分析结果", Font: legacyFont(9, true), TextColor: legacyLight.Text},
 					TextEdit{
 						AssignTo:      &a.aiOutput,
 						ReadOnly:      true,
 						VScroll:       true,
 						HScroll:       false,
 						CompactHeight: false,
+						MinSize:       Size{Height: 120},
 						StretchFactor: 1,
 					},
-					Label{Text: "追问", Font: Font{Family: "Microsoft YaHei UI", PointSize: 9, Bold: true}, TextColor: walk.RGB(28, 40, 56)},
 					Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-						TextEdit{AssignTo: &a.aiFollowUp, VScroll: true, CompactHeight: false, MinSize: Size{Height: 54}, StretchFactor: 1},
-						PushButton{Text: "发送追问", MinSize: Size{Width: 94}, OnClicked: a.sendAIFollowUp},
+						Label{Text: "追问", Font: legacyFont(9, true), TextColor: legacyLight.Text},
+						HSpacer{},
+						PushButton{Text: "发送追问", MinSize: Size{Width: 84}, MaxSize: Size{Width: 84}, OnClicked: a.sendAIFollowUp},
 					}},
+					TextEdit{AssignTo: &a.aiFollowUp, VScroll: true, CompactHeight: false, MinSize: Size{Height: 42}, MaxSize: Size{Height: 50}},
 				},
 			},
 		},
@@ -1163,9 +1439,12 @@ func (a *legacyApp) assignedTableWithMinHeight(columns []tableColumn, model *tab
 	}
 	return TableView{
 		AssignTo:                    assignTo,
-		Background:                  SolidColorBrush{Color: walk.RGB(255, 255, 255)},
+		Background:                  legacyBrush(legacyLight.Surface),
+		Font:                        legacyFont(10, false),
 		ContextMenuItems:            menu,
 		Columns:                     toTableViewColumns(columns),
+		CustomHeaderHeight:          29,
+		CustomRowHeight:             26,
 		Model:                       model,
 		MinSize:                     minSize,
 		AlternatingRowBG:            true,
@@ -1173,6 +1452,9 @@ func (a *legacyApp) assignedTableWithMinHeight(columns []tableColumn, model *tab
 		SelectionHiddenWithoutFocus: false,
 		StretchFactor:               1,
 		OnCurrentIndexChanged:       onCurrent,
+		StyleCell: func(style *walk.CellStyle) {
+			styleLegacyTableCell(model, columns, style)
+		},
 	}
 }
 
@@ -1208,7 +1490,7 @@ func (a *legacyApp) repaintCurrentTables() {
 	case 3:
 		tables = []*walk.TableView{a.eventView}
 	case 4:
-		tables = []*walk.TableView{a.historyView}
+		tables = []*walk.TableView{a.historyConnectionView, a.historyDNSView, a.historyLiveView, a.historyMonitorView, a.historyAllView}
 	case 5:
 		tables = []*walk.TableView{a.fileTraceView}
 	case 6:
@@ -1223,7 +1505,11 @@ func (a *legacyApp) repaintCurrentTables() {
 			a.memoryView,
 			a.driverView,
 			a.eventView,
-			a.historyView,
+			a.historyConnectionView,
+			a.historyDNSView,
+			a.historyLiveView,
+			a.historyMonitorView,
+			a.historyAllView,
 			a.fileTraceView,
 			a.registryView,
 		}
@@ -1243,7 +1529,11 @@ func (a *legacyApp) repaintAllTables() {
 		a.memoryView,
 		a.driverView,
 		a.eventView,
-		a.historyView,
+		a.historyConnectionView,
+		a.historyDNSView,
+		a.historyLiveView,
+		a.historyMonitorView,
+		a.historyAllView,
 		a.fileTraceView,
 		a.registryView,
 	} {
@@ -1273,6 +1563,9 @@ func (a *legacyApp) onMainTabChanged() {
 	if a.mainTabs == nil {
 		return
 	}
+	if a.mainNav != nil {
+		a.mainNav.setCurrent(a.mainTabs.CurrentIndex())
+	}
 	switch a.mainTabs.CurrentIndex() {
 	case 0:
 		if !a.processStarted {
@@ -1291,6 +1584,7 @@ func (a *legacyApp) onMainTabChanged() {
 			a.refreshEvents()
 		}
 	case 4:
+		a.refreshAllHistoryViews()
 		if !a.historyStarted {
 			a.refreshHistory()
 		}
@@ -1394,6 +1688,7 @@ func (a *legacyApp) loadProcessDetails(pid uint32, name string, force bool) {
 	a.selectedPID = pid
 	a.selectedName = name
 	a.hasSelection = true
+	a.updateProcessBasicInfo(pid)
 	a.detailSeq++
 	seq := a.detailSeq
 	a.moduleModel.SetRows(nil)
@@ -1458,6 +1753,7 @@ func (a *legacyApp) clearProcessDetails(text string) {
 	if a.processDetail != nil {
 		_ = a.processDetail.SetText(text)
 	}
+	a.clearProcessBasicInfo(text)
 }
 
 func (a *legacyApp) exportSelectedModules() {
@@ -1639,12 +1935,11 @@ func (a *legacyApp) saveCurrentEventDetails() {
 
 func (a *legacyApp) historyContextMenu() []MenuItem {
 	return []MenuItem{
-		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.historyView, a.historyModel, "历史通信详情") }},
-		Action{Text: "复制远程/DNS", OnTriggered: func() { a.copyHistoryTarget() }},
-		Action{Text: "复制详情", OnTriggered: func() { a.copyTableColumn(a.historyView, a.historyModel, 11, "详情") }},
-		Action{Text: "保存详情", OnTriggered: func() { a.saveTableRowDetails(a.historyView, a.historyModel, "history-detail") }},
+		Action{Text: "查看详情", OnTriggered: a.showCurrentHistoryDetails},
+		Action{Text: "复制通信目标", OnTriggered: a.copyHistoryTarget},
+		Action{Text: "保存详情", OnTriggered: a.saveCurrentHistoryDetails},
 		Separator{},
-		Action{Text: "复制整行", OnTriggered: func() { a.copyTableRow(a.historyView, a.historyModel, "历史通信") }},
+		Action{Text: "复制整行", OnTriggered: a.copyCurrentHistoryRow},
 	}
 }
 
@@ -1737,7 +2032,7 @@ func (a *legacyApp) showCopyableTextDialog(title, text string) {
 		Children: []Widget{
 			Label{
 				Text:      "完整字段，可选择文本或复制全部。",
-				TextColor: walk.RGB(86, 101, 121),
+				TextColor: legacyLight.MutedText,
 			},
 			TextEdit{
 				AssignTo:      &detailText,
@@ -1814,24 +2109,77 @@ func (a *legacyApp) tableRowDetailText(view *walk.TableView, model *tableModel) 
 }
 
 func (a *legacyApp) copyHistoryTarget() {
-	row := currentTableRow(a.historyView, a.historyModel)
+	view, model, _ := a.currentHistoryTable()
+	row := currentTableRow(view, model)
 	if len(row) == 0 {
 		a.setStatus("请先选择一行。")
 		return
 	}
-	value := strings.TrimSpace(valueAt(row, 7))
-	if value == "" {
-		value = strings.TrimSpace(valueAt(row, 8))
+	value := ""
+	for _, title := range []string{"通信目标", "远程地址", "DNS 查询", "本地地址"} {
+		if index := tableColumnIndex(model, title); index >= 0 {
+			value = strings.TrimSpace(valueAt(row, index))
+			if value != "" && value != "-" {
+				break
+			}
+		}
 	}
 	if value == "" {
-		a.setStatus("远程/DNS 为空，未复制。")
+		a.setStatus("通信目标为空，未复制。")
 		return
 	}
 	if err := walk.Clipboard().SetText(value); err != nil {
 		a.showError("复制失败", err)
 		return
 	}
-	a.setStatus("已复制远程/DNS：" + compactStatusValue(value))
+	a.setStatus("已复制通信目标：" + compactStatusValue(value))
+}
+
+func tableColumnIndex(model *tableModel, title string) int {
+	if model == nil {
+		return -1
+	}
+	for index, column := range model.columns {
+		if column.Title == title {
+			return index
+		}
+	}
+	return -1
+}
+
+func (a *legacyApp) currentHistoryTable() (*walk.TableView, *tableModel, string) {
+	switch currentIndex(a.historyTabs) {
+	case 1:
+		return a.historyDNSView, a.historyDNSModel, "dns-records"
+	case 2:
+		return a.historyLiveView, a.historyLiveModel, "current-connections"
+	case 3:
+		return a.historyMonitorView, a.historyMonitorModel, "short-connections"
+	case 4:
+		return a.historyAllView, a.historyAllModel, "network-evidence"
+	default:
+		return a.historyConnectionView, a.historyConnectionModel, "connection-history"
+	}
+}
+
+func (a *legacyApp) showCurrentHistoryDetails() {
+	view, model, _ := a.currentHistoryTable()
+	a.showTableRowDetails(view, model, "历史通信详情")
+}
+
+func (a *legacyApp) saveCurrentHistoryDetails() {
+	view, model, name := a.currentHistoryTable()
+	a.saveTableRowDetails(view, model, name+"-detail")
+}
+
+func (a *legacyApp) copyCurrentHistoryRow() {
+	view, model, _ := a.currentHistoryTable()
+	a.copyTableRow(view, model, "历史通信")
+}
+
+func (a *legacyApp) exportCurrentHistoryTable() {
+	_, model, name := a.currentHistoryTable()
+	a.exportModel(name, model)
 }
 
 func (a *legacyApp) refreshHost() {
@@ -1967,10 +2315,11 @@ func (a *legacyApp) refreshHistory() {
 				a.setStatus("历史通信读取失败。")
 				return
 			}
+			a.historyItems = append([]history.Record(nil), snapshot.Records...)
+			a.historyCollectionWarnings = append([]string(nil), snapshot.CollectionErrors...)
 			a.historyRows = rows
 			a.historyWarnings = warnings
-			a.setSummary(a.historySummary, historySummaryText(snapshot.Records, snapshot.CollectionErrors))
-			a.applyHistoryFilter()
+			a.refreshAllHistoryViews()
 			warn := ""
 			if len(snapshot.CollectionErrors) > 0 {
 				warn = fmt.Sprintf("，采集提示 %d 条", len(snapshot.CollectionErrors))
@@ -2083,6 +2432,10 @@ func (a *legacyApp) refreshVisibleHostTable() {
 }
 
 func (a *legacyApp) setHostKind(kind string) {
+	if a.hostNav != nil {
+		index := map[string]int{"services": 0, "tasks": 1, "startup": 2, "users": 3, "ifeo": 4, "persistence": 5}[kind]
+		a.hostNav.setCurrent(index)
+	}
 	if a.hostKind == kind {
 		return
 	}
@@ -2163,8 +2516,58 @@ func (a *legacyApp) applyFindingFilter() {
 }
 
 func (a *legacyApp) onFindingTabChanged() {
+	if a.findingNav != nil && a.findingTabs != nil {
+		a.findingNav.setCurrent(a.findingTabs.CurrentIndex())
+	}
 	a.applyFindingFilter()
 	a.scheduleRepaintAfterNavigation()
+}
+
+func (a *legacyApp) onHistoryTabChanged() {
+	if a.historyNav != nil && a.historyTabs != nil {
+		a.historyNav.setCurrent(a.historyTabs.CurrentIndex())
+	}
+	switch currentIndex(a.historyTabs) {
+	case 2:
+		a.refreshCurrentConnectionsView()
+	case 3:
+		a.refreshHistoryMonitorViews()
+	case 4:
+		a.refreshHistoryAllEvidenceView()
+	default:
+		a.applyHistoryFilter()
+	}
+	a.scheduleRepaintAfterNavigation()
+}
+
+func (a *legacyApp) startHistoryMonitorRefreshLoop() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if a.mw == nil {
+					continue
+				}
+				a.mw.Synchronize(func() {
+					if currentIndex(a.mainTabs) == 4 && currentIndex(a.historyTabs) == 3 {
+						a.refreshHistoryMonitorViews()
+					}
+				})
+			case <-a.historyMonitorStop:
+				return
+			}
+		}
+	}()
+}
+
+func (a *legacyApp) stopHistoryMonitorRefreshLoop() {
+	a.historyMonitorStopOnce.Do(func() {
+		if a.historyMonitorStop != nil {
+			close(a.historyMonitorStop)
+		}
+	})
 }
 
 func (a *legacyApp) exportCurrentFindingTable() {
@@ -2185,10 +2588,58 @@ func (a *legacyApp) applyEventFilter() {
 }
 
 func (a *legacyApp) applyHistoryFilter() {
-	rows := copyRows(a.historyRows)
-	rows = appendRows(rows, a.historyWarnings)
-	a.historyModel.SetRows(filterRows(rows, lineText(a.historySearch)))
-	a.repaintTable(a.historyView)
+	query := lineText(a.historySearch)
+	changed := false
+	changed = setTableRowsIfChanged(a.historyConnectionModel, filterRows(a.historyConnectionRows, query)) || changed
+	changed = setTableRowsIfChanged(a.historyDNSModel, filterRows(a.historyDNSRows, query)) || changed
+	changed = setTableRowsIfChanged(a.historyLiveModel, filterRows(a.historyLiveRows, query)) || changed
+	changed = setTableRowsIfChanged(a.historyMonitorModel, filterRows(a.historyMonitorRows, query)) || changed
+	changed = setTableRowsIfChanged(a.historyAllModel, filterRows(a.historyAllRows, query)) || changed
+	if !changed {
+		return
+	}
+	view, _, _ := a.currentHistoryTable()
+	a.repaintTable(view)
+}
+
+func (a *legacyApp) historyMonitorSnapshot() history.ConnectionMonitorSnapshot {
+	snapshot := history.ConnectionMonitorSnapshot{}
+	if a.connectionMonitor != nil {
+		snapshot = a.connectionMonitor.Snapshot()
+	}
+	return snapshot
+}
+
+func (a *legacyApp) refreshAllHistoryViews() {
+	snapshot := a.historyMonitorSnapshot()
+	a.historyConnectionRows = historyConnectionDisplayRows(a.historyItems)
+	a.historyDNSRows = historyDNSDisplayRows(a.historyItems)
+	a.historyLiveRows = historyLiveDisplayRows(snapshot.Items)
+	a.historyMonitorRows = historyMonitorDisplayRows(snapshot.Items)
+	a.historyAllRows = historyAllDisplayRows(a.historyItems, a.historyCollectionWarnings, snapshot)
+	a.setSummary(a.historySummary, historySummaryText(a.historyItems, a.historyCollectionWarnings, snapshot, len(a.historyLiveRows)))
+	a.applyHistoryFilter()
+}
+
+func (a *legacyApp) refreshCurrentConnectionsView() {
+	snapshot := a.historyMonitorSnapshot()
+	a.historyLiveRows = historyLiveDisplayRows(snapshot.Items)
+	a.setSummary(a.historySummary, historySummaryText(a.historyItems, a.historyCollectionWarnings, snapshot, len(a.historyLiveRows)))
+	a.applyHistoryFilter()
+}
+
+func (a *legacyApp) refreshHistoryMonitorViews() {
+	snapshot := a.historyMonitorSnapshot()
+	a.historyMonitorRows = historyMonitorDisplayRows(snapshot.Items)
+	a.setSummary(a.historySummary, historySummaryText(a.historyItems, a.historyCollectionWarnings, snapshot, len(a.historyLiveRows)))
+	a.applyHistoryFilter()
+}
+
+func (a *legacyApp) refreshHistoryAllEvidenceView() {
+	snapshot := a.historyMonitorSnapshot()
+	a.historyAllRows = historyAllDisplayRows(a.historyItems, a.historyCollectionWarnings, snapshot)
+	a.setSummary(a.historySummary, historySummaryText(a.historyItems, a.historyCollectionWarnings, snapshot, len(a.historyLiveRows)))
+	a.applyHistoryFilter()
 }
 
 func (a *legacyApp) applyFileTraceFilter() {
@@ -2276,6 +2727,10 @@ func (a *legacyApp) setEventCategory(category string) {
 		category = "all"
 	}
 	a.eventCategory = category
+	if a.eventNav != nil {
+		index := map[string]int{"all": 0, "logon-success": 1, "logon-failed": 2, "rdp": 3, "service": 4, "user-create": 5, "powershell": 6}[category]
+		a.eventNav.setCurrent(index)
+	}
 	a.applyEventFilter()
 	count := 0
 	if a.eventModel != nil {
@@ -2650,6 +3105,7 @@ type legacyEvidenceSnapshot struct {
 	Events              []securitylog.Event
 	EventWarnings       [][]string
 	History             [][]string
+	HistoryMonitor      [][]string
 	FileTraces          [][]string
 	Registry            [][]string
 	SelectedModules     [][]string
@@ -2659,6 +3115,10 @@ type legacyEvidenceSnapshot struct {
 }
 
 func (a *legacyApp) captureCurrentEvidence() legacyEvidenceSnapshot {
+	monitorRows := copyRows(a.historyMonitorRows)
+	if a.connectionMonitor != nil {
+		monitorRows = historyMonitorDisplayRows(a.connectionMonitor.Snapshot().Items)
+	}
 	return legacyEvidenceSnapshot{
 		CapturedAt:          time.Now().Format("2006-01-02 15:04:05"),
 		Processes:           copyRows(a.processRows),
@@ -2669,6 +3129,7 @@ func (a *legacyApp) captureCurrentEvidence() legacyEvidenceSnapshot {
 		Events:              append([]securitylog.Event(nil), a.eventItems...),
 		EventWarnings:       copyRows(a.eventWarnings),
 		History:             appendRows(copyRows(a.historyRows), a.historyWarnings),
+		HistoryMonitor:      monitorRows,
 		FileTraces:          appendRows(copyRows(a.fileTraceRows), a.fileTraceWarnings),
 		Registry:            copyRows(a.registryRows),
 		SelectedModules:     a.moduleModel.Rows(),
@@ -2762,6 +3223,7 @@ func (a *legacyApp) beginProgress(key, label string, determinate bool, value int
 		determinate: determinate,
 		generation:  token,
 	}
+	a.setProgressVisible(true)
 	a.renderProgress()
 	return token
 }
@@ -2805,6 +3267,7 @@ func (a *legacyApp) completeProgress(key string, token uint64, label string) {
 	if a.progressText != nil {
 		_ = a.progressText.SetText(label + "：100%")
 	}
+	a.setProgressVisible(false)
 }
 
 func (a *legacyApp) failProgress(key string, token uint64, label string) {
@@ -2827,6 +3290,7 @@ func (a *legacyApp) failProgress(key string, token uint64, label string) {
 	if a.progressText != nil {
 		_ = a.progressText.SetText(label + "：失败")
 	}
+	a.setProgressVisible(false)
 }
 
 func (a *legacyApp) cancelProgress(key string) {
@@ -2845,12 +3309,14 @@ func (a *legacyApp) cancelProgress(key string) {
 	if a.progressText != nil {
 		_ = a.progressText.SetText("采集进度：就绪")
 	}
+	a.setProgressVisible(false)
 }
 
 func (a *legacyApp) renderProgress() {
 	if a.progressBar == nil || a.progressText == nil || len(a.progressTasks) == 0 {
 		return
 	}
+	a.setProgressVisible(true)
 	anyIndeterminate := false
 	minimum := 100
 	label := ""
@@ -3120,28 +3586,29 @@ func eventSummaryText(events []securitylog.Event, warnings []string) string {
 		len(events), logon, failed, rdp, services, len(warnings))
 }
 
-func historySummaryText(records []history.Record, warnings []string) string {
-	sysmon := 0
+func historySummaryText(records []history.Record, warnings []string, monitor history.ConnectionMonitorSnapshot, currentCount int) string {
+	connections := 0
 	dns := 0
-	wfp := 0
-	firewall := 0
-	cache := 0
+	syn := 0
 	for _, item := range records {
-		switch {
-		case strings.Contains(item.Source, "Sysmon"):
-			sysmon++
-		case strings.Contains(item.Source, "DNS Client"):
+		if isHistoryDNSRecord(item) {
 			dns++
-		case strings.Contains(item.Source, "WFP"):
-			wfp++
-		case strings.Contains(item.Source, "防火墙"):
-			firewall++
-		case strings.Contains(item.Source, "DNS 缓存"):
-			cache++
+		}
+		if isHistoricalConnectionRecord(item) {
+			connections++
 		}
 	}
-	return fmt.Sprintf("记录 %d    Sysmon %d    DNS Client %d    WFP %d    防火墙 %d    DNS缓存 %d    采集提示 %d",
-		len(records), sysmon, dns, wfp, firewall, cache, len(warnings))
+	for _, item := range monitor.Items {
+		if strings.Contains(strings.ToUpper(item.State), "SYN") {
+			syn++
+		}
+	}
+	warningCount := len(warnings)
+	if strings.TrimSpace(monitor.LastError) != "" {
+		warningCount++
+	}
+	return fmt.Sprintf("连接历史 %d    DNS %d    当前连接 %d    短连接 %d    SYN 线索 %d    采集提示 %d",
+		connections, dns, currentCount, len(monitor.Items), syn, warningCount)
 }
 
 func fileTraceSummaryText(records []filetrace.Record, warnings []string) string {
@@ -3583,6 +4050,211 @@ func historyRows(items []history.Record) [][]string {
 	return rows
 }
 
+func historyConnectionDisplayRows(items []history.Record) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		if !isHistoricalConnectionRecord(item) {
+			continue
+		}
+		rows = append(rows, []string{
+			item.Time,
+			item.Source,
+			historyProcessPID(item.Process, item.PID),
+			item.Local,
+			item.Remote,
+			joinHistoryDisplay(item.Proto, item.Action),
+			historyRecordDetail(item),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []string{
+			"",
+			"采集说明",
+			"未发现连接历史",
+			"",
+			"",
+			"相关日志可能未启用",
+			"Windows 默认不保存完整连接历史。请启用 Sysmon 网络连接事件 3、Windows Filtering Platform 连接审计 5156/5157，或 Windows 防火墙日志后再读取。当前连接和程序运行期间捕获的 SYN 线索可在对应页面查看。",
+		})
+	}
+	return rows
+}
+
+func historyDNSDisplayRows(items []history.Record) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		if !isHistoryDNSRecord(item) {
+			continue
+		}
+		rows = append(rows, []string{
+			item.Source,
+			item.Query,
+			historyRecordDetail(item),
+			item.Time,
+			item.Process,
+			item.PID,
+		})
+	}
+	return rows
+}
+
+func historyLiveDisplayRows(items []history.ObservedConnection) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		if !item.CurrentlyActive {
+			continue
+		}
+		rows = append(rows, []string{
+			item.LastSeen,
+			"当前快照",
+			observedProcessPID(item),
+			joinHistoryDisplay(item.Protocol, item.State),
+			item.Local,
+			item.Remote,
+			item.RemoteKind,
+			item.Path,
+		})
+	}
+	return rows
+}
+
+func historyMonitorDisplayRows(items []history.ObservedConnection) [][]string {
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		active := "否"
+		if item.CurrentlyActive {
+			active = "是"
+		}
+		rows = append(rows, []string{
+			item.FirstSeen,
+			item.LastSeen,
+			observedProcessPID(item),
+			joinHistoryDisplay(item.Protocol, item.State),
+			item.Local,
+			item.Remote,
+			fmt.Sprintf("%d / %d", item.Occurrences, item.Samples),
+			active,
+			item.Path,
+			item.RemoteKind,
+		})
+	}
+	return rows
+}
+
+func historyAllDisplayRows(items []history.Record, warnings []string, monitor history.ConnectionMonitorSnapshot) [][]string {
+	rows := make([][]string, 0, len(items)+len(warnings)+len(monitor.Items)+1)
+	for _, item := range items {
+		target := item.Query
+		if strings.TrimSpace(target) == "" {
+			target = item.Remote
+		}
+		if strings.TrimSpace(target) == "" {
+			target = item.Local
+		}
+		rows = append(rows, []string{
+			item.Time,
+			item.Source,
+			historyProcessPID(item.Process, item.PID),
+			target,
+			joinHistoryDisplay(item.Proto, item.Action),
+			historyRecordDetail(item),
+			item.Local,
+			item.Process,
+		})
+	}
+	for _, item := range monitor.Items {
+		detail := fmt.Sprintf("首次发现=%s; 最后发现=%s; 出现次数=%d; 采样次数=%d; 当前存在=%t; 远程类型=%s",
+			item.FirstSeen, item.LastSeen, item.Occurrences, item.Samples, item.CurrentlyActive, item.RemoteKind)
+		rows = append(rows, []string{
+			item.LastSeen,
+			"短连接监测",
+			observedProcessPID(item),
+			item.Remote,
+			joinHistoryDisplay(item.Protocol, item.State),
+			detail,
+			item.Local,
+			item.Path,
+		})
+	}
+	now := monitor.GeneratedAt
+	if strings.TrimSpace(now) == "" {
+		now = time.Now().Format("2006-01-02 15:04:05")
+	}
+	for _, warning := range warnings {
+		rows = append(rows, []string{now, "采集提示", "", "", "", warning, "", ""})
+	}
+	if strings.TrimSpace(monitor.LastError) != "" {
+		rows = append(rows, []string{now, "短连接监测提示", "", "", "", monitor.LastError, "", ""})
+	}
+	return rows
+}
+
+func isHistoricalConnectionRecord(item history.Record) bool {
+	source := strings.ToLower(strings.TrimSpace(item.Source))
+	return strings.Contains(source, "sysmon 网络") || strings.Contains(source, "wfp") || strings.Contains(source, "防火墙")
+}
+
+func isHistoryDNSRecord(item history.Record) bool {
+	source := strings.ToLower(strings.TrimSpace(item.Source))
+	return strings.Contains(source, "dns") || strings.Contains(source, "hosts")
+}
+
+func historyProcessPID(processName, pid string) string {
+	name := strings.TrimSpace(processName)
+	if name != "" {
+		name = filepath.Base(strings.Trim(name, `"`))
+	}
+	pid = strings.TrimSpace(pid)
+	if name != "" && pid != "" {
+		return fmt.Sprintf("%s (PID %s)", name, pid)
+	}
+	if name != "" {
+		return name
+	}
+	if pid != "" {
+		return "PID " + pid
+	}
+	return ""
+}
+
+func observedProcessPID(item history.ObservedConnection) string {
+	return historyProcessPID(item.Process, strconv.FormatUint(uint64(item.PID), 10))
+}
+
+func joinHistoryDisplay(values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && value != "-" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, " / ")
+}
+
+func historyRecordDetail(item history.Record) string {
+	parts := make([]string, 0, 8)
+	if item.EventID != "" {
+		parts = append(parts, "事件ID="+item.EventID)
+	}
+	if item.Query != "" {
+		parts = append(parts, "查询="+item.Query)
+	}
+	if item.User != "" {
+		parts = append(parts, "用户="+item.User)
+	}
+	if item.Process != "" {
+		parts = append(parts, "进程="+item.Process)
+	}
+	if item.PID != "" {
+		parts = append(parts, "PID="+item.PID)
+	}
+	if strings.TrimSpace(item.Details) != "" {
+		parts = append(parts, item.Details)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func historyWarningRows(generatedAt string, warnings []string) [][]string {
 	rows := make([][]string, 0, len(warnings))
 	if generatedAt == "" {
@@ -3685,6 +4357,32 @@ func filterRows(rows [][]string, q string) [][]string {
 		}
 	}
 	return filtered
+}
+
+func setTableRowsIfChanged(model *tableModel, rows [][]string) bool {
+	if model == nil || sameRowSet(model.rows, rows) {
+		return false
+	}
+	model.SetRows(rows)
+	return true
+}
+
+func sameRowSet(left, right [][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[string]int, len(left))
+	for _, row := range left {
+		counts[strings.Join(row, "\x00")]++
+	}
+	for _, row := range right {
+		key := strings.Join(row, "\x00")
+		if counts[key] == 0 {
+			return false
+		}
+		counts[key]--
+	}
+	return true
 }
 
 func rowFilterMatcher(query string) func(string) bool {
@@ -4115,7 +4813,7 @@ func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot 
 		findingSummaryText(findings),
 		registrySummaryText(registrySnapshot),
 		eventSummaryText(securitySnapshot.Events, securitySnapshot.CollectionErrors),
-		historySummaryText(historySnapshot.Records, historySnapshot.CollectionErrors),
+		historySummaryText(historySnapshot.Records, historySnapshot.CollectionErrors, history.ConnectionMonitorSnapshot{}, 0),
 		fileTraceSummaryText(fileTraceSnapshot.Records, fileTraceSnapshot.CollectionErrors),
 		"",
 		"文件清单:",
@@ -4123,6 +4821,7 @@ func evidenceSummary(generatedAt string, processes []process.Info, hostSnapshot 
 		"- process-modules.csv（最多 80 个进程，优先联网和异常进程）",
 		"- network-connections.csv",
 		"- network-history.csv",
+		"- network-short-connections.csv（本次程序运行期间保留的间歇连接观测）",
 		"- file-traces.csv",
 		"- host-all.csv / host-services.csv / host-tasks.csv / host-startup.csv / host-users.csv / host-ifeo.csv / host-persistence.csv",
 		"- findings.csv",
@@ -4393,6 +5092,11 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 			return err
 		}
 	}
+	if len(current.HistoryMonitor) > 0 {
+		if err := writeZipCSV(zw, "network-short-connections.csv", headersOf(historyMonitorColumns), current.HistoryMonitor); err != nil {
+			return err
+		}
+	}
 	if fileTraceErr == nil {
 		rows := fileTraceRows(fileTraceSnapshot.Records)
 		rows = appendRows(rows, fileTraceWarningRows(fileTraceSnapshot.GeneratedAt, fileTraceSnapshot.CollectionErrors))
@@ -4478,6 +5182,7 @@ func writeCurrentSessionEvidence(zw *zip.Writer, snapshot legacyEvidenceSnapshot
 		{"driver-risks", headersOf(driverColumns), snapshot.Drivers},
 		{"security-events", eventExportHeaders, eventRows},
 		{"network-history", headersOf(historyColumns), snapshot.History},
+		{"network-short-connections", headersOf(historyMonitorColumns), snapshot.HistoryMonitor},
 		{"file-traces", headersOf(fileTraceColumns), snapshot.FileTraces},
 		{"registry-anomalies", headersOf(registryColumns), snapshot.Registry},
 		{"selected-process-modules", headersOf(processModuleColumns), snapshot.SelectedModules},

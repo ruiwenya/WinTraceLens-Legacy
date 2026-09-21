@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
 // +build windows
 
 package walk
@@ -21,7 +22,7 @@ func NewPushButton(parent Container) (*PushButton, error) {
 		pb,
 		parent,
 		"BUTTON",
-		win.WS_TABSTOP|win.WS_VISIBLE|win.BS_PUSHBUTTON,
+		win.WS_TABSTOP|win.WS_VISIBLE|win.BS_PUSHBUTTON|win.BS_FLAT,
 		0); err != nil {
 		return nil, err
 	}

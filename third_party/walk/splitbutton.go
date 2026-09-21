@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
 // +build windows
 
 package walk
@@ -29,7 +30,7 @@ func NewSplitButton(parent Container) (*SplitButton, error) {
 		sb,
 		parent,
 		"BUTTON",
-		win.WS_TABSTOP|win.WS_VISIBLE|win.BS_SPLITBUTTON,
+		win.WS_TABSTOP|win.WS_VISIBLE|win.BS_SPLITBUTTON|win.BS_FLAT,
 		0); err != nil {
 		return nil, err
 	}
