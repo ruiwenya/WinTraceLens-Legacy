@@ -2,21 +2,33 @@
 
 WinTraceLens Legacy 是面向 Windows 7、Windows Server 2012 / 2012 R2 等旧版 Windows 系统的应急响应辅助工具。它使用 Go 1.20.x 构建，采用 Windows 原生 GUI 控件，不依赖 WebView2 或浏览器运行环境，适合在老旧服务器、隔离环境和现场排查场景中快速运行。
 
-## UI 候选版构建
+## 界面与操作
 
-浅色原生 UI 保留横向 8 个功能页和现有采集、筛选、导出逻辑，包含 Common Controls v6 manifest、System DPI Aware 声明、应用图标、紧凑应用栏、统一表格状态样式以及可折叠的进程详情区域。
+正式版采用离线 Windows 原生 GUI，包含应用图标、融合标题栏、横向功能导航、统一表格状态样式和可折叠的进程详情区域。界面支持标准与紧凑密度，可在低分辨率、普通窗口和最大化状态下使用；不适合融合标题栏的环境会回退到系统窗口框架。
+
+列表优先展示风险判断所需的状态、签名、路径、命令和来源，完整字段通过可复制的详情窗口或 CSV 查看。耗时采集会显示阶段和百分比，避免用户把等待误认为程序卡死。
+
+## 下载与运行
+
+最新正式版可从 [GitHub Releases](https://github.com/ruiwenya/WinTraceLens-Legacy/releases) 下载 `WinTraceLens-legacy.exe`。建议以管理员权限运行；程序不依赖 WebView2，也不会从互联网加载界面资源。
+
+## 从源码构建
+
+正式构建固定使用 Go 1.20.14，并固定资源工具 `github.com/akavel/rsrc@v0.10.2`：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-legacy-ui-preview.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 ```
 
-脚本固定使用 Go 1.20.14，并固定资源工具 `github.com/akavel/rsrc@v0.10.2`。候选程序输出到 `dist\WinTraceLens-legacy-ui-preview.exe`；经典版可另存为 `dist\classic-1.1.1\WinTraceLens-legacy-1.1.1-classic.exe`。
-
-确认候选界面后，可用同一脚本生成正式版本：
+如需指定输出位置或版本号：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-legacy-ui-preview.ps1 -Output "dist\WinTraceLens-legacy.exe" -Version "1.2.0-legacy"
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 `
+  -Output "dist\WinTraceLens-legacy.exe" `
+  -Version "1.2.0-legacy"
 ```
+
+脚本会生成 GUI 程序、单文件 SHA-256 校验文件，并在构建前执行兼容测试。发布文件未进行 Authenticode 签名，公开分发前应使用受信任代码签名证书签名；未签名程序可能被 SmartScreen、Smart App Control 或终端安全软件拦截。
 
 该版本用于帮助分析人员在应急响应初期快速建立主机视图，定位异常进程、异常持久化、可疑登录、RDP 行为、PowerShell 痕迹、服务创建、用户创建、历史通信证据和可疑文件活动。它不是 EDR，也不替代完整取证平台，但可以作为现场快速排查和留痕导出的基础工具。
 

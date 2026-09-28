@@ -444,6 +444,18 @@ type legacyApp struct {
 	hashLimitBytes   int64
 	forceSystemFrame bool
 	windowFrameMode  string
+	integratedFrame  bool
+	frameHeader      *walk.Composite
+	frameIcon        *walk.ImageView
+	frameBrand       *walk.Label
+	frameAbout       *walk.PushButton
+	frameExport      *walk.PushButton
+	frameMin         *walk.PushButton
+	frameMax         *walk.PushButton
+	frameClose       *walk.PushButton
+	frameLastClick   time.Time
+	frameLastX       int
+	frameLastY       int
 	compactTables    bool
 	startCompact     bool
 	processStarted   bool
@@ -456,7 +468,11 @@ type legacyApp struct {
 	processView          *walk.TableView
 	processSplitter      *walk.Splitter
 	processDetailPane    *walk.Composite
+	processDetailHeader  *walk.Composite
+	processDetailEmpty   *walk.Label
 	processDetailToggle  *walk.PushButton
+	detailPreference     detailPreference
+	detailLayoutPending  bool
 	processDetailTabs    *walk.TabWidget
 	processDetailNav     *navigationBar
 	processInfoIdentity  *walk.LineEdit
@@ -467,6 +483,10 @@ type legacyApp struct {
 	processInfoMD5       *walk.LineEdit
 	processInfoPath      *walk.LineEdit
 	processInfoCommand   *walk.LineEdit
+	processInfoNarrow    [8]*walk.LineEdit
+	processBasicWide     *walk.Composite
+	processBasicNarrow   *walk.ScrollView
+	processNarrowMode    bool
 	uiReady              bool
 	processRows          [][]string
 	processItems         []process.Info
@@ -619,7 +639,7 @@ func main() {
 	runtime.LockOSThread()
 
 	hashLimitMB := flag.Int64("hash-limit-mb", 512, "skip MD5 hashing for executable files larger than this size")
-	systemFrame := flag.Bool("system-frame", false, "use the standard Windows frame without caption color integration")
+	systemFrame := flag.Bool("system-frame", false, "compatibility flag; the Legacy UI always uses the standard Windows frame")
 	compactMode := flag.Bool("compact", false, "start with compact table density")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -670,6 +690,7 @@ func newLegacyApp(hashLimitBytes int64, forceSystemFrame, startCompact bool) *le
 }
 
 func (a *legacyApp) run() error {
+	a.integratedFrame = !a.forceSystemFrame && !highContrastEnabled()
 	mainWindow := MainWindow{
 		AssignTo:        &a.mw,
 		Title:           "WinTraceLens Legacy",
@@ -709,14 +730,25 @@ func (a *legacyApp) run() error {
 	if err := mainWindow.Create(); err != nil {
 		return err
 	}
+	win.SetMenu(a.mw.Handle(), 0)
+	if a.mw.ToolBar() != nil {
+		a.mw.ToolBar().SetVisible(false)
+	}
+	if a.mw.StatusBar() != nil {
+		a.mw.StatusBar().SetVisible(false)
+	}
 	a.mw.Closing().Attach(func(_ *bool, _ walk.CloseReason) {
 		a.stopHistoryMonitorRefreshLoop()
 	})
 	a.windowFrameMode = a.applyWindowFrame()
+	a.styleToolbarButtons()
 	a.configureComboDropDowns()
 	a.applyTableVisuals()
+	a.configureProcessDetailFields()
 	a.setTableDensity(a.startCompact)
 	a.configureNavigationBars()
+	a.updateDetailContentVisibility()
+	a.setProcessDetailExpanded(false)
 	a.uiReady = true
 	a.onMainWindowBoundsChanged()
 
@@ -789,18 +821,52 @@ func setComboMinVisible(combo *walk.ComboBox, count int) {
 }
 
 func (a *legacyApp) header() Widget {
+	children := []Widget{
+		ImageView{AssignTo: &a.frameIcon, Image: "2", MinSize: Size{Width: 20, Height: 20}, MaxSize: Size{Width: 20, Height: 20}, Mode: ImageViewModeShrink, OnMouseDown: a.beginFrameDrag},
+		Label{AssignTo: &a.frameBrand, Text: "WinTraceLens Legacy", Font: legacyFont(10, true), TextColor: legacyLight.Text, MinSize: Size{Width: 174}, Alignment: AlignHNearVCenter, OnMouseDown: a.beginFrameDrag},
+		HSpacer{},
+		PushButton{AssignTo: &a.densityToggle, Text: "紧凑显示", MinSize: Size{Width: 92, Height: 29}, MaxSize: Size{Width: 92, Height: 29}, OnClicked: func() {
+			a.setTableDensity(!a.compactTables)
+			a.releaseFrameButtonFocus()
+		}},
+		PushButton{AssignTo: &a.frameAbout, Text: "关于", MinSize: Size{Width: 68, Height: 29}, MaxSize: Size{Width: 68, Height: 29}, OnClicked: func() {
+			a.showAbout()
+			a.releaseFrameButtonFocus()
+		}},
+		PushButton{AssignTo: &a.frameExport, Text: "导出取证包", MinSize: Size{Width: 104, Height: 29}, MaxSize: Size{Width: 104, Height: 29}, OnClicked: func() {
+			a.exportEvidencePackage()
+			a.releaseFrameButtonFocus()
+		}},
+	}
+	if a.integratedFrame {
+		children = append(children,
+			PushButton{AssignTo: &a.frameMin, Text: "─", MinSize: Size{Width: 42, Height: 34}, MaxSize: Size{Width: 42, Height: 34}, OnClicked: func() { win.ShowWindow(a.mw.Handle(), win.SW_MINIMIZE) }},
+			PushButton{AssignTo: &a.frameMax, Text: "□", MinSize: Size{Width: 42, Height: 34}, MaxSize: Size{Width: 42, Height: 34}, OnClicked: func() {
+				a.toggleWindowMaximize()
+				a.releaseFrameButtonFocus()
+			}},
+			PushButton{AssignTo: &a.frameClose, Text: "×", MinSize: Size{Width: 42, Height: 34}, MaxSize: Size{Width: 42, Height: 34}, OnClicked: func() { win.PostMessage(a.mw.Handle(), win.WM_CLOSE, 0, 0) }},
+		)
+	}
 	return Composite{
-		Background: legacyBrush(legacyLight.TitleBar),
-		MinSize:    Size{Height: 40},
-		MaxSize:    Size{Height: 40},
-		Layout:     HBox{Margins: Margins{Left: 12, Top: 5, Right: 12, Bottom: 5}, Spacing: 8},
-		Children: []Widget{
-			HSpacer{},
-			PushButton{AssignTo: &a.densityToggle, Text: "紧凑显示", MinSize: Size{Width: 82, Height: 28}, MaxSize: Size{Width: 82, Height: 28}, OnClicked: func() { a.setTableDensity(!a.compactTables) }},
-			PushButton{Text: "恢复窗口", MinSize: Size{Width: 78, Height: 28}, MaxSize: Size{Width: 78, Height: 28}, OnClicked: a.restoreWindow},
-			PushButton{Text: "帮助", MinSize: Size{Width: 58, Height: 28}, MaxSize: Size{Width: 58, Height: 28}, OnClicked: a.showUIHelp},
-			PushButton{Text: "导出取证包", MinSize: Size{Width: 98, Height: 28}, MaxSize: Size{Width: 98, Height: 28}, OnClicked: a.exportEvidencePackage},
-		},
+		AssignTo:    &a.frameHeader,
+		Background:  legacyBrush(legacyLight.TitleBar),
+		MinSize:     Size{Height: 40},
+		MaxSize:     Size{Height: 40},
+		Layout:      HBox{Margins: Margins{Left: 12, Top: 3, Right: 4, Bottom: 3}, Spacing: 8},
+		Children:    children,
+		OnMouseDown: a.beginFrameDrag,
+	}
+}
+
+func (a *legacyApp) toggleWindowMaximize() {
+	if a.mw == nil {
+		return
+	}
+	if win.IsZoomed(a.mw.Handle()) {
+		win.ShowWindow(a.mw.Handle(), win.SW_RESTORE)
+	} else {
+		win.ShowWindow(a.mw.Handle(), win.SW_MAXIMIZE)
 	}
 }
 
@@ -867,7 +933,7 @@ func (a *legacyApp) contentArea() Widget {
 		)
 	}
 	return Composite{
-		StretchFactor: 1,
+		StretchFactor: 10000,
 		Background:    legacyBrush(legacyLight.Surface),
 		Layout:        VBox{MarginsZero: true, SpacingZero: true},
 		Children: []Widget{
@@ -968,7 +1034,7 @@ func (a *legacyApp) processToolbar() Widget {
 			Label{Text: "搜索", TextColor: legacyLight.Text},
 			LineEdit{AssignTo: &a.processSearch, MinSize: Size{Width: 180}, MaxSize: Size{Width: 420}, StretchFactor: 1, OnTextChanged: a.applyProcessFilter},
 			PushButton{Text: "刷新", MinSize: Size{Width: 68}, MaxSize: Size{Width: 68}, OnClicked: a.refreshProcesses},
-			PushButton{AssignTo: &a.processDetailToggle, Text: "收起详情", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.toggleProcessDetailPanel},
+			PushButton{AssignTo: &a.processDetailToggle, Text: "展开详情", MinSize: Size{Width: 78}, MaxSize: Size{Width: 78}, OnClicked: a.toggleProcessDetailPanel},
 			PushButton{Text: "导出 CSV", MinSize: Size{Width: 82}, MaxSize: Size{Width: 82}, OnClicked: func() { a.exportModel("processes", a.processModel) }},
 			HSpacer{},
 		},
@@ -976,12 +1042,15 @@ func (a *legacyApp) processToolbar() Widget {
 }
 
 func (a *legacyApp) processPage() Widget {
+	processTable := a.assignedTableWithMinHeight(processColumns, a.processModel, &a.processView, a.onProcessSelected, a.processContextMenu(), 120).(TableView)
+	processTable.StretchFactor = 10
 	return VSplitter{
-		AssignTo:      &a.processSplitter,
-		StretchFactor: 1,
-		HandleWidth:   4,
+		AssignTo:        &a.processSplitter,
+		StretchFactor:   1,
+		HandleWidth:     4,
+		OnBoundsChanged: a.onMainWindowBoundsChanged,
 		Children: []Widget{
-			a.assignedTableWithMinHeight(processColumns, a.processModel, &a.processView, a.onProcessSelected, a.processContextMenu(), 120),
+			processTable,
 			a.processDetailPanel(),
 		},
 	}
@@ -1001,12 +1070,15 @@ func (a *legacyApp) processDetailPanel() Widget {
 	return Composite{
 		AssignTo:      &a.processDetailPane,
 		StretchFactor: 1,
-		MinSize:       Size{Height: 185},
-		MaxSize:       Size{Height: 235},
+		MinSize:       Size{Height: 38},
+		MaxSize:       Size{Height: 38},
 		Background:    legacyBrush(legacyLight.Chrome),
 		Layout:        VBox{Margins: Margins{Left: 0, Top: 0, Right: 0, Bottom: 0}, Spacing: 4},
 		Children: []Widget{
+			Label{AssignTo: &a.processDetailEmpty, Text: "选择进程查看详情", TextColor: legacyLight.MutedText, Visible: true},
 			Composite{
+				AssignTo:   &a.processDetailHeader,
+				Visible:    false,
 				Background: legacyBrush(legacyLight.Surface),
 				MinSize:    Size{Height: 30},
 				MaxSize:    Size{Height: 30},
@@ -1028,6 +1100,7 @@ func (a *legacyApp) processDetailPanel() Widget {
 			},
 			TabWidget{
 				AssignTo:           &a.processDetailTabs,
+				Visible:            false,
 				ContentMarginsZero: true,
 				HeaderHidden:       true,
 				StretchFactor:      1,
@@ -1051,25 +1124,75 @@ func (a *legacyApp) processDetailPanel() Widget {
 func (a *legacyApp) processBasicPanel() Widget {
 	return Composite{
 		Background: legacyBrush(legacyLight.Surface),
+		Layout:     VBox{MarginsZero: true, SpacingZero: true},
+		Children: []Widget{
+			a.processBasicWidePanel(),
+			ScrollView{
+				AssignTo: &a.processBasicNarrow, Visible: false,
+				HorizontalFixed: false,
+				Background:      legacyBrush(legacyLight.Surface),
+				Layout:          Grid{Columns: 2, Margins: Margins{Left: 8, Top: 4, Right: 8, Bottom: 4}, Spacing: 5},
+				Children: []Widget{
+					processFieldLabel(0, 0, "进程 / PID"),
+					processReadOnlyField(0, 1, 1, &a.processInfoNarrow[0]),
+					processFieldLabel(1, 0, "父进程"),
+					processReadOnlyField(1, 1, 1, &a.processInfoNarrow[1]),
+					processFieldLabel(2, 0, "资源"),
+					processReadOnlyField(2, 1, 1, &a.processInfoNarrow[2]),
+					processFieldLabel(3, 0, "签名"),
+					processReadOnlyField(3, 1, 1, &a.processInfoNarrow[3]),
+					processFieldLabel(4, 0, "创建时间"),
+					processReadOnlyField(4, 1, 1, &a.processInfoNarrow[4]),
+					processFieldLabel(5, 0, "MD5"),
+					processReadOnlyField(5, 1, 1, &a.processInfoNarrow[5]),
+					processFieldLabel(6, 0, "路径"),
+					processReadOnlyField(6, 1, 1, &a.processInfoNarrow[6]),
+					processFieldLabel(7, 0, "命令行"),
+					processReadOnlyField(7, 1, 1, &a.processInfoNarrow[7]),
+				},
+			},
+		},
+	}
+}
+
+func (a *legacyApp) processBasicWidePanel() Widget {
+	return Composite{
+		AssignTo:   &a.processBasicWide,
+		Background: legacyBrush(legacyLight.Surface),
 		Layout:     Grid{Columns: 4, Margins: Margins{Left: 8, Top: 4, Right: 8, Bottom: 4}, Spacing: 5},
 		Children: []Widget{
-			Label{Row: 0, Column: 0, Text: "进程 / PID", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 0, Column: 1, AssignTo: &a.processInfoIdentity, ReadOnly: true, StretchFactor: 1},
-			Label{Row: 0, Column: 2, Text: "父进程", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 0, Column: 3, AssignTo: &a.processInfoParent, ReadOnly: true, StretchFactor: 1},
-			Label{Row: 1, Column: 0, Text: "资源", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 1, Column: 1, AssignTo: &a.processInfoResources, ReadOnly: true, StretchFactor: 1},
-			Label{Row: 1, Column: 2, Text: "签名", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 1, Column: 3, AssignTo: &a.processInfoSignature, ReadOnly: true, StretchFactor: 1},
-			Label{Row: 2, Column: 0, Text: "创建时间", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 2, Column: 1, AssignTo: &a.processInfoCreated, ReadOnly: true, StretchFactor: 1},
-			Label{Row: 2, Column: 2, Text: "MD5", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 2, Column: 3, AssignTo: &a.processInfoMD5, ReadOnly: true, StretchFactor: 1},
-			Label{Row: 3, Column: 0, Text: "路径", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 3, Column: 1, ColumnSpan: 3, AssignTo: &a.processInfoPath, ReadOnly: true, StretchFactor: 1},
-			Label{Row: 4, Column: 0, Text: "命令行", TextColor: legacyLight.MutedText},
-			LineEdit{Row: 4, Column: 1, ColumnSpan: 3, AssignTo: &a.processInfoCommand, ReadOnly: true, StretchFactor: 1},
+			processFieldLabel(0, 0, "进程 / PID"),
+			processReadOnlyField(0, 1, 1, &a.processInfoIdentity),
+			processFieldLabel(0, 2, "父进程"),
+			processReadOnlyField(0, 3, 1, &a.processInfoParent),
+			processFieldLabel(1, 0, "资源"),
+			processReadOnlyField(1, 1, 1, &a.processInfoResources),
+			processFieldLabel(1, 2, "签名"),
+			processReadOnlyField(1, 3, 1, &a.processInfoSignature),
+			processFieldLabel(2, 0, "创建时间"),
+			processReadOnlyField(2, 1, 1, &a.processInfoCreated),
+			processFieldLabel(2, 2, "MD5"),
+			processReadOnlyField(2, 3, 1, &a.processInfoMD5),
+			processFieldLabel(3, 0, "路径"),
+			processReadOnlyField(3, 1, 3, &a.processInfoPath),
+			processFieldLabel(4, 0, "命令行"),
+			processReadOnlyField(4, 1, 3, &a.processInfoCommand),
 		},
+	}
+}
+
+func processReadOnlyField(row, column, span int, target **walk.LineEdit) LineEdit {
+	return LineEdit{
+		Row: row, Column: column, ColumnSpan: span, AssignTo: target,
+		ReadOnly: true, StretchFactor: 1, MinSize: Size{Height: 24}, MaxSize: Size{Height: 24},
+		Background: legacyBrush(legacyLight.Surface), TextColor: legacyLight.Text,
+	}
+}
+
+func processFieldLabel(row, column int, text string) Label {
+	return Label{
+		Row: row, Column: column, Text: text, TextColor: legacyLight.MutedText,
+		MinSize: Size{Height: 24}, MaxSize: Size{Height: 24}, Alignment: AlignHNearVCenter,
 	}
 }
 
@@ -1626,6 +1749,7 @@ func (a *legacyApp) refreshProcesses() {
 			a.processRows = rows
 			a.setSummary(a.processSummary, processSummaryText(items))
 			a.applyProcessFilter()
+			_ = a.processView.SetCurrentIndex(-1)
 			a.clearProcessDetails("请选择一个进程查看模块列表和网络连接。")
 			a.completeProgress("processes", progressToken, "进程信息")
 			a.setStatus(fmt.Sprintf("进程信息完成：%d 条。", len(rows)))
@@ -1688,6 +1812,8 @@ func (a *legacyApp) loadProcessDetails(pid uint32, name string, force bool) {
 	a.selectedPID = pid
 	a.selectedName = name
 	a.hasSelection = true
+	a.updateDetailContentVisibility()
+	a.onMainWindowBoundsChanged()
 	a.updateProcessBasicInfo(pid)
 	a.detailSeq++
 	seq := a.detailSeq
@@ -1737,6 +1863,8 @@ func (a *legacyApp) loadProcessDetails(pid uint32, name string, force bool) {
 func (a *legacyApp) clearProcessDetails(text string) {
 	a.cancelProgress("process-detail")
 	a.hasSelection = false
+	a.updateDetailContentVisibility()
+	a.onMainWindowBoundsChanged()
 	a.selectedPID = 0
 	a.selectedName = ""
 	a.detailSeq++
@@ -2022,7 +2150,7 @@ func (a *legacyApp) showCopyableTextDialog(title, text string) {
 	var closeButton *walk.PushButton
 	var detailText *walk.TextEdit
 
-	_, err := (Dialog{
+	dialogSpec := Dialog{
 		AssignTo:     &dlg,
 		Title:        title,
 		CancelButton: &closeButton,
@@ -2060,10 +2188,16 @@ func (a *legacyApp) showCopyableTextDialog(title, text string) {
 				}},
 			}},
 		},
-	}).Run(a.mw)
-	if err != nil {
-		a.showError("打开详情失败", err)
 	}
+	if err := dialogSpec.Create(a.mw); err != nil {
+		a.showError("打开详情失败", err)
+		return
+	}
+	dlg.Starting().Once(func() {
+		detailText.SetTextSelection(0, 0)
+		_ = closeButton.SetFocus()
+	})
+	dlg.Run()
 }
 
 func (a *legacyApp) saveDetailText(owner walk.Form, name, text string) {

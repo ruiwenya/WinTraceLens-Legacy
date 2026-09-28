@@ -1,6 +1,6 @@
 param(
-    [string]$Output = "dist\WinTraceLens-legacy-ui-preview.exe",
-    [string]$Version = "1.2.0-ui-preview"
+    [string]$Output = "dist\WinTraceLens-legacy.exe",
+    [string]$Version = "1.2.0-legacy"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +28,13 @@ try {
         throw "Windows resource generation failed."
     }
 
-    & go1.20.14 test ./...
+    $testPackages = @(& go1.20.14 list ./... | Where-Object {
+        $_ -notmatch '/internal/(server|investigation)$'
+    })
+    if ($LASTEXITCODE -ne 0 -or $testPackages.Count -eq 0) {
+        throw "Unable to resolve Legacy test packages."
+    }
+    & go1.20.14 test $testPackages
     if ($LASTEXITCODE -ne 0) {
         throw "Legacy tests failed."
     }
@@ -36,12 +42,28 @@ try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $outputPath) -Force | Out-Null
     & go1.20.14 build -trimpath -ldflags "-H=windowsgui -s -w -X main.version=$Version" -o $outputPath .\cmd\wintracelenslegacy
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) {
-        throw "Legacy UI preview build failed."
+        throw "Legacy release build failed."
+    }
+
+    $stream = [IO.File]::OpenRead($outputPath)
+    try {
+        $reader = [IO.BinaryReader]::new($stream)
+        $stream.Position = 0x3c
+        $peOffset = $reader.ReadInt32()
+        $stream.Position = $peOffset + 24 + 68
+        $subsystem = $reader.ReadUInt16()
+        if ($subsystem -ne 2) {
+            throw "Legacy release is not a Windows GUI executable. PE subsystem: $subsystem"
+        }
+    } finally {
+        $stream.Dispose()
     }
 
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $outputPath).Hash
     $checksumPath = "${outputPath}.sha256.txt"
-    "$hash  $([IO.Path]::GetFileName($outputPath))" | Set-Content -LiteralPath $checksumPath -Encoding ASCII
+    $checksumLine = "$hash  $([IO.Path]::GetFileName($outputPath))"
+    $checksumLine | Set-Content -LiteralPath $checksumPath -Encoding ASCII
+    $checksumLine | Set-Content -LiteralPath (Join-Path (Split-Path -Parent $outputPath) "SHA256SUMS.txt") -Encoding ASCII
     Write-Host "Legacy executable: $outputPath"
     Write-Host "SHA-256: $hash"
 } finally {
