@@ -8,6 +8,12 @@ WinTraceLens Legacy 是面向 Windows 7、Windows Server 2012 / 2012 R2 等旧�
 
 列表优先展示风险判断所需的状态、签名、路径、命令和来源，完整字段通过可复制的详情窗口或 CSV 查看。耗时采集会显示阶段和百分比，避免用户把等待误认为程序卡死。
 
+当前版本 `1.2.1-legacy` 增加持久化执行链核查：分别检查系统入口及后续 EXE、脚本、DLL 的状态、哈希和签名，Stopped 不代表异步载荷已经退出。主机信息与综合风险主列表精简，提供逐行“查看详情”；详情可复制与保存，搜索仍覆盖隐藏字段。
+
+可疑服务的 7045/4697 事件按服务名定向补采，RecordID、时间及完整 XML 独立加入取证包，不受普通事件列表配额挤占。文件、日志、历史通信显示采集边界，可通过表格右键“采集范围与限制”查看；持久化命令发现的目录和文件只做有预算的本地元数据补采，不执行样本、不自动修改系统。
+
+本版同时修复服务创建日志中的中文乱码：事件查询统一使用 Unicode 输出，保留服务名、服务类型、启动类型及原始 XML 的中文内容，详情和 CSV 使用同一份解码结果。完整变更见 [更新日志](CHANGELOG.md)。
+
 ## 下载与运行
 
 最新正式版可从 [GitHub Releases](https://github.com/ruiwenya/WinTraceLens-Legacy/releases) 下载 `WinTraceLens-legacy.exe`。建议以管理员权限运行；程序不依赖 WebView2，也不会从互联网加载界面资源。
@@ -25,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 `
   -Output "dist\WinTraceLens-legacy.exe" `
-  -Version "1.2.0-legacy"
+  -Version "1.2.1-legacy"
 ```
 
 脚本会生成 GUI 程序、单文件 SHA-256 校验文件，并在构建前执行兼容测试。发布文件未进行 Authenticode 签名，公开分发前应使用受信任代码签名证书签名；未签名程序可能被 SmartScreen、Smart App Control 或终端安全软件拦截。

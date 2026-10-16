@@ -281,18 +281,26 @@ func collectDriverEvents(maxEvents int) ([]driverEvent, []string) {
 
 func queryDriverEvents(log string, eventID, maxEvents int) ([]driverWevtEvent, error) {
 	query := fmt.Sprintf("*[System[(EventID=%d)]]", eventID)
-	cmd := winexec.Command("wevtutil.exe", "qe", log, "/q:"+query, "/f:xml", "/rd:true", "/c:"+strconv.Itoa(maxEvents))
+	cmd := winexec.WevtutilCommand("qe", log, "/q:"+query, "/f:xml", "/rd:true", "/c:"+strconv.Itoa(maxEvents))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		message := strings.TrimSpace(decodeDriverOutput(stderr.Bytes()))
+		message, decodeErr := winexec.DecodeEventOutput(stderr.Bytes())
+		message = strings.TrimSpace(message)
+		if decodeErr != nil {
+			message = decodeErr.Error()
+		}
 		if message == "" {
 			message = err.Error()
 		}
 		return nil, fmt.Errorf("wevtutil 查询失败: %s", message)
 	}
-	text := strings.TrimSpace(decodeDriverOutput(out))
+	text, err := winexec.DecodeEventOutput(out)
+	if err != nil {
+		return nil, err
+	}
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, nil
 	}
@@ -300,7 +308,6 @@ func queryDriverEvents(log string, eventID, maxEvents int) ([]driverWevtEvent, e
 	text = strings.ReplaceAll(text, `<?xml version="1.0" encoding="utf-8"?>`, "")
 	text = strings.ReplaceAll(text, `<?xml version="1.0"?>`, "")
 	text = strings.TrimPrefix(text, "\ufeff")
-	text = strings.ToValidUTF8(text, "")
 	text = "<Events>" + text + "</Events>"
 	var container driverWevtEvents
 	if err := xml.Unmarshal([]byte(text), &container); err != nil {

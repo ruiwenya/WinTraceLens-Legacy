@@ -77,6 +77,7 @@ func collectNativeHistory(opts Options, maxRecords int) (Snapshot, error) {
 	snapshot.Records, eventErrors = limitHistoryRecordsBySource(deduplicateHistoryRecords(snapshot.Records), maxRecords)
 	snapshot.CollectionErrors = append(snapshot.CollectionErrors, eventErrors...)
 	snapshot.CollectionErrors = uniqueHistoryStrings(localizeHistoryErrors(snapshot.CollectionErrors))
+	snapshot.Coverage = historyCoverage(snapshot, maxRecords)
 	return snapshot, nil
 }
 
@@ -176,27 +177,33 @@ func collectHistoryEvents(opts Options, maxRecords int) ([]Record, []string) {
 func queryHistoryEvents(logName string, ids []int, opts Options, maxRecords int) ([]historyWevtEvent, error) {
 	xpath := buildHistoryXPath(ids, opts)
 	args := []string{"qe", logName, "/q:" + xpath, "/f:xml", "/rd:true", "/c:" + strconv.Itoa(maxRecords)}
-	cmd := winexec.Command("wevtutil.exe", args...)
+	cmd := winexec.WevtutilCommand(args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		message := strings.TrimSpace(decodeCommandOutput(stderr.Bytes()))
+		message, decodeErr := winexec.DecodeEventOutput(stderr.Bytes())
+		message = strings.TrimSpace(message)
+		if decodeErr != nil {
+			message = decodeErr.Error()
+		}
 		if message == "" {
 			message = err.Error()
 		}
 		return nil, fmt.Errorf("wevtutil 查询失败: %s", message)
 	}
-	data := bytes.TrimSpace(out)
-	if len(data) == 0 {
+	text, err := winexec.DecodeEventOutput(out)
+	if err != nil {
+		return nil, err
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return nil, nil
 	}
-	text := strings.TrimSpace(decodeCommandOutput(data))
 	text = strings.ReplaceAll(text, `<?xml version="1.0" encoding="utf-16"?>`, "")
 	text = strings.ReplaceAll(text, `<?xml version="1.0" encoding="utf-8"?>`, "")
 	text = strings.ReplaceAll(text, `<?xml version="1.0"?>`, "")
 	text = strings.TrimPrefix(text, "\ufeff")
-	text = strings.ToValidUTF8(text, "")
 	text = "<Events>" + text + "</Events>"
 	var container historyWevtEvents
 	if err := xml.Unmarshal([]byte(text), &container); err != nil {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ruiwenya/WinTraceLens/internal/analysis"
 	"github.com/ruiwenya/WinTraceLens/internal/filetrace"
 	"github.com/ruiwenya/WinTraceLens/internal/host"
 	"github.com/ruiwenya/WinTraceLens/internal/memoryscan"
@@ -387,12 +388,33 @@ func buildPersistenceIndex(snapshot host.Snapshot) map[string][]string {
 	}
 	for _, item := range snapshot.Services {
 		add(item.Path, "服务:"+displayName(item.Name, item.DisplayName))
+		if item.ExecutionChain != nil {
+			for _, target := range item.ExecutionChain.Payloads {
+				if target.Kind == "file" {
+					add(target.Path, "服务后续目标:"+item.Name)
+				}
+			}
+		}
 	}
 	for _, item := range snapshot.ScheduledTasks {
 		add(item.Executable, "计划任务:"+item.Name)
+		if item.ExecutionChain != nil {
+			for _, target := range item.ExecutionChain.Payloads {
+				if target.Kind == "file" {
+					add(target.Path, "任务后续目标:"+item.Name)
+				}
+			}
+		}
 	}
 	for _, item := range snapshot.StartupItems {
 		add(item.Path, "启动项:"+item.Name)
+		if item.ExecutionChain != nil {
+			for _, target := range item.ExecutionChain.Payloads {
+				if target.Kind == "file" {
+					add(target.Path, "启动项后续目标:"+item.Name)
+				}
+			}
+		}
 	}
 	for _, item := range snapshot.ImageHijacks {
 		add(item.Path, "镜像劫持:"+item.Image)
@@ -402,6 +424,17 @@ func buildPersistenceIndex(snapshot host.Snapshot) map[string][]string {
 
 func standalonePersistence(snapshot host.Snapshot, runningPaths map[string]struct{}) []Item {
 	items := make([]Item, 0)
+	for _, finding := range analysis.BuildFindings(nil, snapshot) {
+		if !strings.HasSuffix(finding.Source, "执行链") {
+			continue
+		}
+		score := 4
+		if finding.Level == "高" {
+			score = 8
+		}
+		items = append(items, Item{Level: finding.Level, Scenario: "持久化执行链", Score: score, Process: finding.Name, Path: finding.Path,
+			MD5: finding.MD5, Signature: finding.Signature, Summary: finding.Reason, Evidence: finding.Command + "；" + finding.Extra, Related: finding.Source})
+	}
 	add := func(source, name, path, md5, signature, sigMsg, command, extra string) {
 		key := normalizePath(path)
 		if key == "" {
@@ -449,12 +482,21 @@ func standalonePersistence(snapshot host.Snapshot, runningPaths map[string]struc
 	}
 
 	for _, item := range snapshot.Services {
+		if item.RiskScore >= 4 {
+			continue
+		}
 		add("服务", displayName(item.Name, item.DisplayName), item.Path, item.MD5, item.Signature, item.SignatureMsg, item.Command, item.StartMode+"/"+item.Account)
 	}
 	for _, item := range snapshot.ScheduledTasks {
+		if item.RiskScore >= 4 {
+			continue
+		}
 		add("计划任务", item.Name, item.Executable, item.MD5, item.Signature, item.SignatureMsg, item.Command+" "+item.Arguments, item.Path)
 	}
 	for _, item := range snapshot.StartupItems {
+		if item.RiskScore >= 4 {
+			continue
+		}
 		add("启动项", item.Name, item.Path, item.MD5, item.Signature, item.SignatureMsg, item.Command, item.Location)
 	}
 	for _, item := range snapshot.ImageHijacks {

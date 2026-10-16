@@ -1,6 +1,6 @@
 param(
     [string]$Output = "dist\WinTraceLens-legacy.exe",
-    [string]$Version = "1.2.0-legacy"
+    [string]$Version = "1.2.1-legacy"
 )
 
 $ErrorActionPreference = "Stop"

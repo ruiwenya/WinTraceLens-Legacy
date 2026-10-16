@@ -92,6 +92,7 @@ type TableView struct {
 	selectedIndexesChangedPublisher    EventPublisher
 	itemActivatedPublisher             EventPublisher
 	columnClickedPublisher             IntEventPublisher
+	cellClickedPublisher               IntRangeEventPublisher
 	columnsOrderableChangedPublisher   EventPublisher
 	columnsSizableChangedPublisher     EventPublisher
 	itemCountChangedPublisher          EventPublisher
@@ -1181,6 +1182,9 @@ func (tv *TableView) setSortIcon(index int, order SortOrder) error {
 func (tv *TableView) ColumnClicked() *IntEvent {
 	return tv.columnClickedPublisher.Event()
 }
+
+// CellClicked reports model row and column indexes after a native list click.
+func (tv *TableView) CellClicked() *IntRangeEvent { return tv.cellClickedPublisher.Event() }
 
 // ItemActivated returns the event that is published after an item was
 // activated.
@@ -2389,6 +2393,12 @@ func (tv *TableView) lvWndProc(origWndProcPtr uintptr, hwnd win.HWND, msg uint32
 
 			nmlvs := (*win.NMLVSCROLL)(unsafe.Pointer(lp))
 			win.SendMessage(hwndOther, win.LVM_SCROLL, 0, uintptr(nmlvs.Dy*(rc.Bottom-rc.Top)))
+
+		case win.NM_CLICK:
+			item := (*win.NMITEMACTIVATE)(unsafe.Pointer(lp))
+			if item.IItem >= 0 && item.ISubItem >= 0 {
+				tv.cellClickedPublisher.Publish(int(item.IItem), tv.fromLVColIdx(hwnd == tv.hwndFrozenLV, item.ISubItem))
+			}
 
 		case win.LVN_COLUMNCLICK:
 			nmlv := (*win.NMLISTVIEW)(unsafe.Pointer(lp))

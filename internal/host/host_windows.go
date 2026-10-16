@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -49,12 +48,13 @@ type psStartupItem struct {
 }
 
 type psTask struct {
-	Name    string `json:"Name"`
-	Path    string `json:"Path"`
-	State   string `json:"State"`
-	Status  string `json:"Status"`
-	Author  string `json:"Author"`
-	Command string `json:"Command"`
+	WorkingDirectory string `json:"WorkingDirectory"`
+	Name             string `json:"Name"`
+	Path             string `json:"Path"`
+	State            string `json:"State"`
+	Status           string `json:"Status"`
+	Author           string `json:"Author"`
+	Command          string `json:"Command"`
 }
 
 type psImageHijack struct {
@@ -76,8 +76,9 @@ type taskXML struct {
 	} `xml:"RegistrationInfo"`
 	Actions struct {
 		Exec []struct {
-			Command   string `xml:"Command"`
-			Arguments string `xml:"Arguments"`
+			Command          string `xml:"Command"`
+			Arguments        string `xml:"Arguments"`
+			WorkingDirectory string `xml:"WorkingDirectory"`
 		} `xml:"Exec"`
 	} `xml:"Actions"`
 }
@@ -150,7 +151,11 @@ func Collect(opts Options) (Snapshot, error) {
 		}
 	}
 
+	enrichPersistence(&snapshot, opts)
 	sort.Slice(snapshot.Services, func(i, j int) bool {
+		if snapshot.Services[i].RiskScore != snapshot.Services[j].RiskScore {
+			return snapshot.Services[i].RiskScore > snapshot.Services[j].RiskScore
+		}
 		return strings.ToLower(snapshot.Services[i].Name) < strings.ToLower(snapshot.Services[j].Name)
 	})
 	sort.Slice(snapshot.ScheduledTasks, func(i, j int) bool {
@@ -891,17 +896,18 @@ func tasksFromPS(items []psTask, opts Options) []ScheduledTaskInfo {
 		path := executablePathFromCommand(item.Command)
 		md5, hashErr, sig := enrichExecutable(path, opts)
 		out = append(out, ScheduledTaskInfo{
-			Name:         item.Name,
-			Path:         item.Path,
-			State:        item.State,
-			Status:       item.Status,
-			Author:       item.Author,
-			Command:      item.Command,
-			Executable:   path,
-			MD5:          md5,
-			Signature:    sig.Status,
-			SignatureMsg: sig.Message,
-			HashError:    hashErr,
+			Name:             item.Name,
+			Path:             item.Path,
+			State:            item.State,
+			Status:           item.Status,
+			Author:           item.Author,
+			Command:          item.Command,
+			Executable:       path,
+			WorkingDirectory: item.WorkingDirectory,
+			MD5:              md5,
+			Signature:        sig.Status,
+			SignatureMsg:     sig.Message,
+			HashError:        hashErr,
 		})
 	}
 	return out
@@ -1223,7 +1229,7 @@ function Convert-TaskState($state) {
   switch ($state) { 0 {'Unknown'} 1 {'Disabled'} 2 {'Queued'} 3 {'Ready'} 4 {'Running'} default {[string]$state} }
 }
 function Walk-Folder($folder) {
-  foreach ($task in @($folder.GetTasks(0))) {
+  foreach ($task in @($folder.GetTasks(1))) {
     $emitted = $false
     foreach ($action in @($task.Definition.Actions)) {
       if ($action.Type -eq 0) {
@@ -1234,7 +1240,8 @@ function Walk-Folder($folder) {
           (Clean-Text ($(if ($task.Enabled) {'Enabled'} else {'Disabled'}))),
           (Clean-Text (Convert-TaskState $task.State)),
           (Clean-Text $task.Definition.RegistrationInfo.Author),
-          (Clean-Text $command)
+          (Clean-Text $command),
+          (Clean-Text $action.WorkingDirectory)
         ) -join ([string][char]9)))
         $emitted = $true
       }
@@ -1322,16 +1329,17 @@ func tasksFromTextLines(raw []byte, opts Options) []ScheduledTaskInfo {
 			continue
 		}
 		parts := strings.Split(line, "\t")
-		for len(parts) < 6 {
+		for len(parts) < 7 {
 			parts = append(parts, "")
 		}
 		items = append(items, psTask{
-			Name:    strings.TrimSpace(parts[0]),
-			Path:    strings.TrimSpace(parts[1]),
-			State:   strings.TrimSpace(parts[2]),
-			Status:  strings.TrimSpace(parts[3]),
-			Author:  strings.TrimSpace(parts[4]),
-			Command: strings.TrimSpace(parts[5]),
+			Name:             strings.TrimSpace(parts[0]),
+			Path:             strings.TrimSpace(parts[1]),
+			State:            strings.TrimSpace(parts[2]),
+			Status:           strings.TrimSpace(parts[3]),
+			Author:           strings.TrimSpace(parts[4]),
+			Command:          strings.TrimSpace(parts[5]),
+			WorkingDirectory: strings.TrimSpace(parts[6]),
 		})
 	}
 	return tasksFromPS(items, opts)
@@ -1439,18 +1447,19 @@ func parseScheduledTask(root, path string, opts Options) (ScheduledTaskInfo, err
 	md5, hashErr, sig := enrichExecutable(executable, opts)
 
 	return ScheduledTaskInfo{
-		Name:         filepath.Base(path),
-		Path:         taskPath,
-		State:        "",
-		Status:       "",
-		Author:       task.RegistrationInfo.Author,
-		Command:      execAction.Command,
-		Arguments:    execAction.Arguments,
-		Executable:   executable,
-		MD5:          md5,
-		Signature:    sig.Status,
-		SignatureMsg: sig.Message,
-		HashError:    hashErr,
+		Name:             filepath.Base(path),
+		Path:             taskPath,
+		State:            "",
+		Status:           "",
+		Author:           task.RegistrationInfo.Author,
+		Command:          execAction.Command,
+		Arguments:        execAction.Arguments,
+		WorkingDirectory: execAction.WorkingDirectory,
+		Executable:       executable,
+		MD5:              md5,
+		Signature:        sig.Status,
+		SignatureMsg:     sig.Message,
+		HashError:        hashErr,
 	}, nil
 }
 
@@ -1520,13 +1529,16 @@ func enrichExecutable(path string, opts Options) (string, string, process.Signat
 	if path == "" {
 		return "", "", process.SignatureResult{}
 	}
+	if reason := unsafePersistenceLocation(path); reason != "" {
+		return "", "未检查：" + reason, process.SignatureResult{}
+	}
 
 	md5, hashErr := process.HashFileMD5(path, opts.HashLimitBytes)
 	return md5, hashErr, process.CheckSignature(path)
 }
 
 func executablePathFromCommand(command string) string {
-	command = strings.TrimSpace(expandWindowsEnv(command))
+	command = strings.TrimSpace(expandPersistenceEnv(command))
 	if command == "" {
 		return ""
 	}
@@ -1605,6 +1617,9 @@ func normalizeExecutablePath(path string, keepMissingAbsolute bool) string {
 	}
 	path = strings.TrimPrefix(path, `\??\`)
 	path = strings.TrimPrefix(path, `\\?\`)
+	if strings.ContainsAny(path, "%$!\x00\r\n") {
+		return ""
+	}
 	if strings.HasPrefix(strings.ToLower(path), "system32\\") {
 		path = filepath.Join(os.Getenv("SystemRoot"), path)
 	}
@@ -1614,6 +1629,12 @@ func normalizeExecutablePath(path string, keepMissingAbsolute bool) string {
 
 	if filepath.IsAbs(path) {
 		clean := filepath.Clean(path)
+		if unsafePersistenceLocation(clean) != "" {
+			if keepMissingAbsolute {
+				return clean
+			}
+			return ""
+		}
 		if info, err := os.Stat(clean); err == nil {
 			if info.IsDir() {
 				return ""
@@ -1626,10 +1647,7 @@ func normalizeExecutablePath(path string, keepMissingAbsolute bool) string {
 		return ""
 	}
 
-	if candidate, err := exec.LookPath(path); err == nil {
-		if clean, err := filepath.Abs(candidate); err == nil {
-			return clean
-		}
+	if candidate := resolvePersistencePath(path, ""); candidate != "" {
 		return candidate
 	}
 	return ""

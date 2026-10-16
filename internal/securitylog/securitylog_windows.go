@@ -35,6 +35,7 @@ func Collect(opts Options) (Snapshot, error) {
 	wevtSnapshot, err := collectWevtutilSnapshot(opts, maxRecords)
 	if err == nil {
 		wevtSnapshot.CollectionErrors = localizeErrors(wevtSnapshot.CollectionErrors)
+		wevtSnapshot.Coverage = eventCoverage(wevtSnapshot, maxRecords)
 		return wevtSnapshot, nil
 	}
 	return Snapshot{
@@ -521,19 +522,27 @@ func queryWevtutil(query wevtQuery, opts Options) ([]wevtEvent, error) {
 		limit = 500
 	}
 	xpath := buildWevtutilXPath(query.ids, opts)
-	cmd := winexec.Command("wevtutil.exe", "qe", query.logName, "/q:"+xpath, "/f:xml", "/c:"+strconv.Itoa(limit), "/rd:true")
+	cmd := winexec.WevtutilCommand("qe", query.logName, "/q:"+xpath, "/f:xml", "/c:"+strconv.Itoa(limit), "/rd:true")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		msg := strings.TrimSpace(decodeCommandOutput(stderr.Bytes()))
+		msg, decodeErr := winexec.DecodeEventOutput(stderr.Bytes())
+		msg = strings.TrimSpace(msg)
+		if decodeErr != nil {
+			msg = decodeErr.Error()
+		}
 		if msg == "" {
 			msg = err.Error()
 		}
 		return nil, errors.New(msg)
 	}
 
-	text := strings.TrimSpace(decodeCommandOutput(out))
+	text, err := winexec.DecodeEventOutput(out)
+	if err != nil {
+		return nil, err
+	}
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, nil
 	}
@@ -541,7 +550,6 @@ func queryWevtutil(query wevtQuery, opts Options) ([]wevtEvent, error) {
 	text = strings.ReplaceAll(text, `<?xml version="1.0" encoding="utf-8"?>`, "")
 	text = strings.ReplaceAll(text, `<?xml version="1.0"?>`, "")
 	text = strings.TrimPrefix(text, "\ufeff")
-	text = strings.ToValidUTF8(text, "")
 	wrapped := "<Events>" + text + "</Events>"
 	var parsed wevtEvents
 	if err := xml.Unmarshal([]byte(wrapped), &parsed); err != nil {

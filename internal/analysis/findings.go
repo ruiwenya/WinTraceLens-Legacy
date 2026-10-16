@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ruiwenya/WinTraceLens/internal/commandchain"
 	"github.com/ruiwenya/WinTraceLens/internal/host"
 	"github.com/ruiwenya/WinTraceLens/internal/process"
 	"github.com/ruiwenya/WinTraceLens/internal/selfidentity"
@@ -50,11 +51,13 @@ func BuildFindings(processes []process.Info, snapshot host.Snapshot) []Finding {
 	}
 
 	for _, item := range snapshot.Services {
+		findings = append(findings, chainFindings("服务执行链", displayName(item.Name, item.DisplayName), item.Command, item.ExecutionChain, item.RiskLevel, item.RiskReasons, item.StateNotice)...)
 		extra := fmt.Sprintf("状态: %s, 启动: %s, 账户: %s", item.State, item.StartMode, item.Account)
 		findings = append(findings, executableFindings("服务", displayName(item.Name, item.DisplayName), item.MD5, item.Signature, item.SignatureMsg, item.Path, item.Command, item.HashError, "", extra, 0)...)
 	}
 
 	for _, item := range snapshot.ScheduledTasks {
+		findings = append(findings, chainFindings("计划任务执行链", item.Name, item.Command+" "+item.Arguments, item.ExecutionChain, item.RiskLevel, item.RiskReasons, item.Path)...)
 		if item.Executable == "" && item.MD5 == "" && item.HashError == "" && item.Signature == "" {
 			continue
 		}
@@ -64,6 +67,7 @@ func BuildFindings(processes []process.Info, snapshot host.Snapshot) []Finding {
 	}
 
 	for _, item := range snapshot.StartupItems {
+		findings = append(findings, chainFindings("启动项执行链", item.Name, item.Command, item.ExecutionChain, item.RiskLevel, item.RiskReasons, item.Location)...)
 		extra := fmt.Sprintf("来源: %s, 位置: %s", item.Source, item.Location)
 		findings = append(findings, executableFindings("启动项", item.Name, item.MD5, item.Signature, item.SignatureMsg, item.Path, item.Command, item.HashError, "", extra, 0)...)
 	}
@@ -87,6 +91,9 @@ func BuildFindings(processes []process.Info, snapshot host.Snapshot) []Finding {
 		})
 	}
 
+	for _, item := range snapshot.PersistenceItems {
+		findings = append(findings, chainFindings(item.Category+"执行链", item.Name, item.Value, item.ExecutionChain, item.RiskLevel, item.RiskReasons, item.Location)...)
+	}
 	for _, item := range snapshot.Users {
 		if item.LocalAccount && !item.Disabled && !item.PasswordRequired {
 			findings = append(findings, Finding{
@@ -109,6 +116,16 @@ func BuildFindings(processes []process.Info, snapshot host.Snapshot) []Finding {
 		return findings[i].Name < findings[j].Name
 	})
 	return findings
+}
+
+func chainFindings(source, name, command string, chain *commandchain.Chain, level string, reasons []string, extra string) []Finding {
+	if level != levelHigh && level != levelMedium {
+		return nil
+	}
+	target := host.PersistenceTarget(chain, commandchain.Target{})
+	return []Finding{{Level: level, Source: source, Name: name, Reason: strings.Join(reasons, "；"), Path: target.Path, MD5: target.MD5,
+		Signature: target.Signature, SignatureMsg: target.SignatureMsg, Command: command,
+		Extra: extra + "；入口系统签名不传递给后续目标；缺失文件不能证明从未执行。"}}
 }
 
 func executableFindings(source, name, md5, signature, signatureMsg, path, command, hashError, pathError, extra string, connectionCount int) []Finding {

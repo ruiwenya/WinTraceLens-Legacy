@@ -349,6 +349,7 @@ foreach ($err in @($errors | Select-Object -Unique)) {
 	snapshot.CollectionErrors = append(snapshot.CollectionErrors, registryArtifacts.warnings...)
 	snapshot.CollectionErrors = append(snapshot.CollectionErrors, ntfsWarnings...)
 	snapshot.CollectionErrors = compactErrors(snapshot.CollectionErrors, 30)
+	snapshot.Coverage = fileCoverage(snapshot, opts, maxRecords)
 	return snapshot, nil
 }
 

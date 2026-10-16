@@ -607,6 +607,7 @@ func collectHost(maxItems int, opts Options) evidenceSection {
 			"imageHijacks":   len(snapshot.ImageHijacks),
 		},
 		"suspiciousServices":       suspiciousServices(snapshot.Services, maxItems),
+		"targetedPersistenceFiles": limitSlice(snapshot.TargetedFiles, maxItems),
 		"suspiciousScheduledTasks": suspiciousTasks(snapshot.ScheduledTasks, maxItems),
 		"startupItems":             limitSlice(snapshot.StartupItems, maxItems),
 		"notableUsers":             notableUsers(snapshot.Users),
@@ -840,17 +841,18 @@ func topConnections(processes []map[string]any, maxItems int) []map[string]any {
 func suspiciousServices(items []host.ServiceInfo, maxItems int) []host.ServiceInfo {
 	out := make([]host.ServiceInfo, 0)
 	for _, item := range items {
-		if executableLooksSuspicious(item.Path, item.Signature, item.HashError) {
+		if item.RiskScore >= 4 || executableLooksSuspicious(item.Path, item.Signature, item.HashError) {
 			out = append(out, item)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].RiskScore > out[j].RiskScore })
 	return limitSlice(out, maxItems)
 }
 
 func suspiciousTasks(items []host.ScheduledTaskInfo, maxItems int) []host.ScheduledTaskInfo {
 	out := make([]host.ScheduledTaskInfo, 0)
 	for _, item := range items {
-		if executableLooksSuspicious(item.Executable, item.Signature, item.HashError) || hasScriptOrLOLBIN(item.Command+" "+item.Arguments) {
+		if item.RiskScore >= 4 || executableLooksSuspicious(item.Executable, item.Signature, item.HashError) || hasScriptOrLOLBIN(item.Command+" "+item.Arguments) {
 			out = append(out, item)
 		}
 	}

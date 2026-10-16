@@ -29,6 +29,8 @@ import (
 
 	"github.com/ruiwenya/WinTraceLens/internal/aianalysis"
 	"github.com/ruiwenya/WinTraceLens/internal/analysis"
+	"github.com/ruiwenya/WinTraceLens/internal/commandchain"
+	"github.com/ruiwenya/WinTraceLens/internal/coverage"
 	"github.com/ruiwenya/WinTraceLens/internal/driveranalysis"
 	"github.com/ruiwenya/WinTraceLens/internal/filetrace"
 	"github.com/ruiwenya/WinTraceLens/internal/history"
@@ -40,7 +42,7 @@ import (
 	"github.com/ruiwenya/WinTraceLens/internal/threatanalysis"
 )
 
-var version = "1.2.0-legacy"
+var version = "1.2.1-legacy"
 
 var shellExecuteW = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
 
@@ -97,11 +99,13 @@ var serviceColumns = []tableColumn{
 	{"状态", 80},
 	{"启动", 90},
 	{"账户", 180},
-	{"MD5", 250},
-	{"签名", 120},
-	{"路径", 380},
+	{"目标 MD5", 250},
+	{"目标签名", 120},
+	{"目标路径", 380},
 	{"命令", 420},
 	{"错误", 240},
+	{"风险", 70},
+	{"执行链与关联证据", -1800},
 }
 
 var taskColumns = []tableColumn{
@@ -110,23 +114,27 @@ var taskColumns = []tableColumn{
 	{"状态", 90},
 	{"运行状态", 100},
 	{"作者", 160},
-	{"MD5", 250},
-	{"签名", 120},
-	{"可执行路径", 380},
+	{"目标 MD5", 250},
+	{"目标签名", 120},
+	{"目标路径", 380},
 	{"命令", 380},
 	{"参数", 260},
 	{"错误", 240},
+	{"风险", 70},
+	{"执行链", -1800},
 }
 
 var startupColumns = []tableColumn{
 	{"来源", 130},
 	{"名称", 180},
-	{"MD5", 250},
-	{"签名", 120},
-	{"路径", 380},
+	{"目标 MD5", 250},
+	{"目标签名", 120},
+	{"目标路径", 380},
 	{"命令", 420},
 	{"位置", 320},
 	{"错误", 240},
+	{"风险", 70},
+	{"执行链", -1800},
 }
 
 var userColumns = []tableColumn{
@@ -157,6 +165,8 @@ var persistenceColumns = []tableColumn{
 	{"签名", 120},
 	{"路径", 420},
 	{"错误", 240},
+	{"风险", 70},
+	{"执行链与原始值", -1800},
 }
 
 var findingColumns = []tableColumn{
@@ -166,9 +176,10 @@ var findingColumns = []tableColumn{
 	{"原因", 260},
 	{"MD5", -250},
 	{"签名", 120},
-	{"路径", 420},
+	{"路径", -420},
 	{"命令", -420},
 	{"补充信息", -380},
+	{"详情", 88},
 }
 
 var memoryColumns = []tableColumn{
@@ -314,16 +325,19 @@ var fileTraceColumns = []tableColumn{
 }
 
 var hostColumns = []tableColumn{
-	{"类型", 72},
+	{"类型", 64},
 	{"名称", 180},
-	{"状态/属性", 170},
+	{"状态/属性", 115},
 	{"账户/作者/SID", -320},
-	{"MD5", -250},
-	{"签名", 105},
-	{"路径", 300},
-	{"命令/详情", 420},
+	{"目标 MD5", -250},
+	{"目标签名", 100},
+	{"目标路径", 240},
+	{"命令/详情", -420},
 	{"位置/注册表", -380},
 	{"错误", -240},
+	{"风险", 60},
+	{"执行链与关联证据", -1800},
+	{"详情", 88},
 }
 
 var registryColumns = []tableColumn{
@@ -535,6 +549,9 @@ type legacyApp struct {
 	hostPersistenceRows [][]string
 	hostAllRows         [][]string
 	hostSnapshot        host.Snapshot
+	fileCoverage        *coverage.Summary
+	eventCoverage       *coverage.Summary
+	historyCoverage     *coverage.Summary
 
 	findingSearch  *walk.LineEdit
 	findingSummary *walk.Label
@@ -744,6 +761,7 @@ func (a *legacyApp) run() error {
 	a.styleToolbarButtons()
 	a.configureComboDropDowns()
 	a.applyTableVisuals()
+	a.installEvidenceDetailCells()
 	a.configureProcessDetailFields()
 	a.setTableDensity(a.startCompact)
 	a.configureNavigationBars()
@@ -1575,6 +1593,11 @@ func (a *legacyApp) assignedTableWithMinHeight(columns []tableColumn, model *tab
 		SelectionHiddenWithoutFocus: false,
 		StretchFactor:               1,
 		OnCurrentIndexChanged:       onCurrent,
+		OnItemActivated: func() {
+			if assignTo == &a.hostView || assignTo == &a.findingView {
+				a.showTableRowDetails(*assignTo, model, "完整证据详情")
+			}
+		},
 		StyleCell: func(style *walk.CellStyle) {
 			styleLegacyTableCell(model, columns, style)
 		},
@@ -2002,6 +2025,7 @@ func (a *legacyApp) connectionContextMenu() []MenuItem {
 func (a *legacyApp) eventContextMenu() []MenuItem {
 	return []MenuItem{
 		Action{Text: "查看详情", OnTriggered: a.showCurrentEventDetails},
+		Action{Text: "采集范围与限制", OnTriggered: func() { a.showCopyableTextDialog("事件日志采集范围", coverage.Describe(a.eventCoverage)) }},
 		Action{Text: "复制详情", OnTriggered: a.copyCurrentEventDetails},
 		Action{Text: "保存详情", OnTriggered: a.saveCurrentEventDetails},
 		Separator{},
@@ -2064,6 +2088,7 @@ func (a *legacyApp) saveCurrentEventDetails() {
 func (a *legacyApp) historyContextMenu() []MenuItem {
 	return []MenuItem{
 		Action{Text: "查看详情", OnTriggered: a.showCurrentHistoryDetails},
+		Action{Text: "采集范围与限制", OnTriggered: func() { a.showCopyableTextDialog("历史通信采集范围", coverage.Describe(a.historyCoverage)) }},
 		Action{Text: "复制通信目标", OnTriggered: a.copyHistoryTarget},
 		Action{Text: "保存详情", OnTriggered: a.saveCurrentHistoryDetails},
 		Separator{},
@@ -2074,6 +2099,7 @@ func (a *legacyApp) historyContextMenu() []MenuItem {
 func (a *legacyApp) fileTraceContextMenu() []MenuItem {
 	return []MenuItem{
 		Action{Text: "查看详情", OnTriggered: func() { a.showTableRowDetails(a.fileTraceView, a.fileTraceModel, "文件痕迹详情") }},
+		Action{Text: "采集范围与限制", OnTriggered: func() { a.showCopyableTextDialog("文件痕迹采集范围", coverage.Describe(a.fileCoverage)) }},
 		Action{Text: "复制路径", OnTriggered: func() { a.copyTableColumn(a.fileTraceView, a.fileTraceModel, 13, "路径") }},
 		Action{Text: "复制原因", OnTriggered: func() { a.copyTableColumn(a.fileTraceView, a.fileTraceModel, 4, "原因") }},
 		Action{Text: "保存详情", OnTriggered: func() { a.saveTableRowDetails(a.fileTraceView, a.fileTraceModel, "file-trace-detail") }},
@@ -2164,10 +2190,10 @@ func (a *legacyApp) showCopyableTextDialog(title, text string) {
 			},
 			TextEdit{
 				AssignTo:      &detailText,
-				Text:          text,
+				Text:          detailPreview(text),
 				ReadOnly:      true,
 				VScroll:       true,
-				HScroll:       true,
+				HScroll:       false,
 				CompactHeight: false,
 				StretchFactor: 1,
 			},
@@ -2230,9 +2256,15 @@ func (a *legacyApp) tableRowDetailText(view *walk.TableView, model *tableModel) 
 	if len(row) == 0 || model == nil {
 		return ""
 	}
-	headers := model.Headers()
+	return fullRowDetail(model.Headers(), row)
+}
+
+func fullRowDetail(headers, row []string) string {
 	var lines []string
 	for i, header := range headers {
+		if header == "详情" && valueAt(row, i) == "查看详情" {
+			continue
+		}
 		value := strings.TrimSpace(valueAt(row, i))
 		if value == "" {
 			continue
@@ -2330,7 +2362,7 @@ func (a *legacyApp) refreshHost() {
 				return
 			}
 			a.hostSnapshot = snapshot
-			a.serviceRows = serviceRows(snapshot.Services)
+			a.serviceRows = serviceRowsWithEvidence(snapshot)
 			a.taskRows = taskRows(snapshot.ScheduledTasks)
 			a.startupRows = startupRows(snapshot.StartupItems)
 			a.userRows = userRows(snapshot.Users)
@@ -2339,6 +2371,7 @@ func (a *legacyApp) refreshHost() {
 			a.setSummary(a.hostSummary, hostSummaryText(snapshot))
 			a.rebuildHostRows()
 			a.refreshVisibleHostTable()
+			a.updatePersistenceFileRows(snapshot)
 			warn := ""
 			if len(snapshot.CollectionErrors) > 0 {
 				warn = fmt.Sprintf("，采集警告 %d 条", len(snapshot.CollectionErrors))
@@ -2417,7 +2450,9 @@ func (a *legacyApp) refreshEvents() {
 			a.eventRows = rows
 			a.eventItems = append([]securitylog.Event(nil), snapshot.Events...)
 			a.eventWarnings = warnings
-			a.setSummary(a.eventSummary, eventSummaryText(snapshot.Events, snapshot.CollectionErrors))
+			a.eventCoverage = snapshot.Coverage
+			a.setSummary(a.eventSummary, eventSummaryText(snapshot.Events, snapshot.CollectionErrors)+coverageShort(snapshot.Coverage))
+			a.eventSummary.SetToolTipText(coverage.Describe(snapshot.Coverage))
 			a.applyEventFilter()
 			warn := ""
 			if len(snapshot.CollectionErrors) > 0 {
@@ -2450,6 +2485,8 @@ func (a *legacyApp) refreshHistory() {
 				return
 			}
 			a.historyItems = append([]history.Record(nil), snapshot.Records...)
+			a.historyCoverage = snapshot.Coverage
+			a.historySummary.SetToolTipText(coverage.Describe(snapshot.Coverage))
 			a.historyCollectionWarnings = append([]string(nil), snapshot.CollectionErrors...)
 			a.historyRows = rows
 			a.historyWarnings = warnings
@@ -2473,8 +2510,10 @@ func (a *legacyApp) refreshFileTrace() {
 	a.fileTraceStarted = true
 	progressToken := a.beginProgress("file-trace", "文件痕迹", false, 0)
 	a.setStatus("正在采集近期文件和传统取证痕迹，请等待...")
+	machine := a.hostSnapshot
 	go func() {
 		snapshot, err := filetrace.Collect(opts)
+		snapshot = filetrace.WithPersistence(snapshot, machine)
 		rows := fileTraceRows(snapshot.Records)
 		warnings := fileTraceWarningRows(snapshot.GeneratedAt, snapshot.CollectionErrors)
 		a.mw.Synchronize(func() {
@@ -2486,7 +2525,9 @@ func (a *legacyApp) refreshFileTrace() {
 			}
 			a.fileTraceRows = rows
 			a.fileTraceWarnings = warnings
-			a.setSummary(a.fileTraceSummary, fileTraceSummaryText(snapshot.Records, snapshot.CollectionErrors))
+			a.fileCoverage = snapshot.Coverage
+			a.setSummary(a.fileTraceSummary, fileTraceSummaryText(snapshot.Records, snapshot.CollectionErrors)+coverageShort(snapshot.Coverage))
+			a.fileTraceSummary.SetToolTipText(coverage.Describe(snapshot.Coverage))
 			a.applyFileTraceFilter()
 			warn := ""
 			if len(snapshot.CollectionErrors) > 0 {
@@ -2813,6 +2854,7 @@ func fileTraceKindOptions() []string {
 		"USN/$MFT",
 		"SRUM",
 		"PowerShell历史",
+		"持久化定向补采",
 		"取证源状态",
 	}
 }
@@ -2846,6 +2888,8 @@ func fileTraceRowsForKind(rows [][]string, kind string) [][]string {
 			match = strings.Contains(source, "SRUM")
 		case "PowerShell历史":
 			match = strings.Contains(source, "PowerShell")
+		case "持久化定向补采":
+			match = source == "持久化定向补采"
 		case "取证源状态":
 			match = category == "取证源状态" || category == "采集提示"
 		}
@@ -3230,6 +3274,8 @@ func (a *legacyApp) exportEvidencePackage() {
 }
 
 type legacyEvidenceSnapshot struct {
+	HostData            host.Snapshot
+	CollectionCoverage  map[string]*coverage.Summary
 	CapturedAt          string
 	Processes           [][]string
 	Host                [][]string
@@ -3254,6 +3300,8 @@ func (a *legacyApp) captureCurrentEvidence() legacyEvidenceSnapshot {
 		monitorRows = historyMonitorDisplayRows(a.connectionMonitor.Snapshot().Items)
 	}
 	return legacyEvidenceSnapshot{
+		HostData:            a.hostSnapshot,
+		CollectionCoverage:  map[string]*coverage.Summary{"file-traces": coverage.Clone(a.fileCoverage), "security-events": coverage.Clone(a.eventCoverage), "network-history": coverage.Clone(a.historyCoverage)},
 		CapturedAt:          time.Now().Format("2006-01-02 15:04:05"),
 		Processes:           copyRows(a.processRows),
 		Host:                copyRows(a.hostAllRows),
@@ -3741,8 +3789,11 @@ func historySummaryText(records []history.Record, warnings []string, monitor his
 	if strings.TrimSpace(monitor.LastError) != "" {
 		warningCount++
 	}
-	return fmt.Sprintf("连接历史 %d    DNS %d    当前连接 %d    短连接 %d    SYN 线索 %d    采集提示 %d",
-		connections, dns, currentCount, len(monitor.Items), syn, warningCount)
+	text := fmt.Sprintf("连接历史 %d    DNS %d    当前连接 %d    短连接 %d    SYN 线索 %d    采集提示 %d", connections, dns, currentCount, len(monitor.Items), syn, warningCount)
+	if connections == 0 {
+		text += "    历史审计证据不足"
+	}
+	return text
 }
 
 func fileTraceSummaryText(records []filetrace.Record, warnings []string) string {
@@ -3799,9 +3850,11 @@ func isUnsignedSignature(value string) bool {
 func serviceRows(items []host.ServiceInfo) [][]string {
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
+		target := host.PersistenceTarget(item.ExecutionChain, commandchain.Target{Path: item.Path, MD5: item.MD5, Signature: item.Signature, HashError: item.HashError})
 		rows = append(rows, []string{
 			item.Name, item.DisplayName, item.State, item.StartMode, item.Account,
-			item.MD5, item.Signature, item.Path, item.Command, item.HashError,
+			target.MD5, target.Signature, target.Path, item.Command, target.HashError,
+			item.RiskLevel, persistenceDetail(item.ExecutionChain, item.RiskScore, item.RiskReasons) + "\r\n" + item.StateNotice,
 		})
 	}
 	return rows
@@ -3810,9 +3863,11 @@ func serviceRows(items []host.ServiceInfo) [][]string {
 func taskRows(items []host.ScheduledTaskInfo) [][]string {
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
+		target := host.PersistenceTarget(item.ExecutionChain, commandchain.Target{Path: item.Executable, MD5: item.MD5, Signature: item.Signature, HashError: item.HashError})
 		rows = append(rows, []string{
 			item.Name, item.Path, item.State, item.Status, item.Author,
-			item.MD5, item.Signature, item.Executable, item.Command, item.Arguments, item.HashError,
+			target.MD5, target.Signature, target.Path, item.Command, item.Arguments, target.HashError,
+			item.RiskLevel, persistenceDetail(item.ExecutionChain, item.RiskScore, item.RiskReasons),
 		})
 	}
 	return rows
@@ -3821,8 +3876,10 @@ func taskRows(items []host.ScheduledTaskInfo) [][]string {
 func startupRows(items []host.StartupItem) [][]string {
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
+		target := host.PersistenceTarget(item.ExecutionChain, commandchain.Target{Path: item.Path, MD5: item.MD5, Signature: item.Signature, HashError: item.HashError})
 		rows = append(rows, []string{
-			item.Source, item.Name, item.MD5, item.Signature, item.Path, item.Command, item.Location, item.HashError,
+			item.Source, item.Name, target.MD5, target.Signature, target.Path, item.Command, item.Location, target.HashError,
+			item.RiskLevel, persistenceDetail(item.ExecutionChain, item.RiskScore, item.RiskReasons),
 		})
 	}
 	return rows
@@ -3865,6 +3922,8 @@ func persistenceRows(items []host.PersistenceInfo) [][]string {
 			item.Signature,
 			item.Path,
 			item.HashError,
+			item.RiskLevel,
+			"原始值: " + item.Value + "\r\n" + persistenceDetail(item.ExecutionChain, item.RiskScore, item.RiskReasons),
 		})
 	}
 	return rows
@@ -3884,6 +3943,7 @@ func hostRowsFromServices(items [][]string) [][]string {
 			valueAt(item, 8),
 			"",
 			valueAt(item, 9),
+			valueAt(item, 10), valueAt(item, 11), "查看详情",
 		})
 	}
 	return rows
@@ -3903,6 +3963,7 @@ func hostRowsFromTasks(items [][]string) [][]string {
 			joinParts(valueAt(item, 8), valueAt(item, 9)),
 			valueAt(item, 1),
 			valueAt(item, 10),
+			valueAt(item, 11), valueAt(item, 12), "查看详情",
 		})
 	}
 	return rows
@@ -3922,6 +3983,7 @@ func hostRowsFromStartup(items [][]string) [][]string {
 			valueAt(item, 5),
 			valueAt(item, 6),
 			valueAt(item, 7),
+			valueAt(item, 8), valueAt(item, 9), "查看详情",
 		})
 	}
 	return rows
@@ -3944,7 +4006,7 @@ func hostRowsFromUsers(items [][]string) [][]string {
 			"",
 		})
 	}
-	return rows
+	return completeHostDetails(rows)
 }
 
 func hostRowsFromIFEO(items [][]string) [][]string {
@@ -3963,7 +4025,7 @@ func hostRowsFromIFEO(items [][]string) [][]string {
 			valueAt(item, 6),
 		})
 	}
-	return rows
+	return completeHostDetails(rows)
 }
 
 func hostRowsFromPersistence(items [][]string) [][]string {
@@ -3980,9 +4042,10 @@ func hostRowsFromPersistence(items [][]string) [][]string {
 			valueAt(item, 2),
 			valueAt(item, 3),
 			valueAt(item, 7),
+			valueAt(item, 8), valueAt(item, 9), "查看详情",
 		})
 	}
-	return rows
+	return completeHostDetails(rows)
 }
 
 func findingRows(items []analysis.Finding) [][]string {
@@ -3998,6 +4061,7 @@ func findingRows(items []analysis.Finding) [][]string {
 			item.Path,
 			item.Command,
 			item.Extra,
+			"查看详情",
 		})
 	}
 	return rows
@@ -4006,16 +4070,24 @@ func findingRows(items []analysis.Finding) [][]string {
 func threatRows(items []threatanalysis.Item) [][]string {
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
+		name, reason := item.Process, item.Summary
+		if item.PID == 0 && (name == "服务" || name == "计划任务" || name == "启动项" || name == "镜像劫持") {
+			name = item.Summary
+		}
+		if item.Scenario == "近期可疑文件" {
+			name, reason = item.Summary, item.Evidence
+		}
 		rows = append(rows, []string{
 			item.Level,
 			item.Scenario,
-			item.Summary,
-			item.Related,
+			name,
+			reason,
 			item.MD5,
 			item.Signature,
 			item.Path,
 			fmt.Sprintf("PID %d / 连接 %d / 评分 %d", item.PID, item.Connections, item.Score),
-			item.Evidence,
+			item.Evidence + "；" + item.Related,
+			"查看详情",
 		})
 	}
 	return rows
@@ -5138,6 +5210,7 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 	historySnapshot, historyErr := history.Collect(history.Options{StartTime: eventOpts.StartTime, EndTime: eventOpts.EndTime, MaxRecords: eventOpts.MaxRecords})
 	reportEvidenceProgress(progress, 68, "取证包：历史通信")
 	fileTraceSnapshot, fileTraceErr := filetrace.Collect(packageFileTraceOptions(eventOpts))
+	fileTraceSnapshot = filetrace.WithPersistence(fileTraceSnapshot, hostSnapshot)
 	reportEvidenceProgress(progress, 80, "取证包：文件痕迹")
 	moduleRows, moduleErr := packageModuleRows(processes, hashLimitBytes)
 	reportEvidenceProgress(progress, 92, "取证包：模块与报告")
@@ -5147,6 +5220,9 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 		return err
 	}
 	if err := writeCurrentSessionEvidence(zw, current); err != nil {
+		return err
+	}
+	if err := writePersistenceEvidence(zw, "", hostSnapshot, map[string]*coverage.Summary{"file-traces": fileTraceSnapshot.Coverage, "security-events": securitySnapshot.Coverage, "network-history": historySnapshot.Coverage}); err != nil {
 		return err
 	}
 	if procErr == nil {
@@ -5165,7 +5241,7 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 		}
 	}
 	if hostErr == nil {
-		serviceRows := serviceRows(hostSnapshot.Services)
+		serviceRows := serviceRowsWithEvidence(hostSnapshot)
 		taskRows := taskRows(hostSnapshot.ScheduledTasks)
 		startupRows := startupRows(hostSnapshot.StartupItems)
 		userRows := userRows(hostSnapshot.Users)
@@ -5296,6 +5372,9 @@ func writeEvidencePackage(path string, eventOpts securitylog.Options, hashLimitB
 }
 
 func writeCurrentSessionEvidence(zw *zip.Writer, snapshot legacyEvidenceSnapshot) error {
+	if err := writePersistenceEvidence(zw, "current-session/", snapshot.HostData, snapshot.CollectionCoverage); err != nil {
+		return err
+	}
 	type dataset struct {
 		name    string
 		headers []string

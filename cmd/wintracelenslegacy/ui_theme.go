@@ -77,6 +77,8 @@ func styleLegacyTableCell(model *tableModel, columns []tableColumn, style *walk.
 	}
 
 	switch {
+	case title == "详情":
+		style.TextColor = legacyLight.Accent
 	case title == "风险" || title == "级别":
 		styleRiskValue(style, value)
 	case title == "可疑" && (value == "是" || value == "高" || value == "中"):
